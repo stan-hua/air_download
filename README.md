@@ -112,6 +112,22 @@ air_download --mrn 12345 -c ~/air_login.txt -o output/ \
     -s "t1,spgr,bravo,mpr"
 ```
 
+**Exclude exams or series by pattern:**
+
+```bash
+# Exclude scout and localizer exams
+air_download --mrn 12345 -c ~/air_login.txt -o output/ -xm-exclude "scout,localizer"
+
+# Exclude secondary exams
+air_download --mrn 12345 -c ~/air_login.txt -o output/ -xd-exclude "secondary"
+
+# Exclude scout series
+air_download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude "scout"
+
+# Combine inclusion and exclusion (keep MR but exclude localizer)
+air_download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
+```
+
 **List available projects or anonymization profiles:**
 
 ```bash
@@ -127,7 +143,11 @@ $ air_download -h
 usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
                     [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN]
                     [-xm EXAM_MODALITY_INCLUSION]
-                    [-xd EXAM_DESCRIPTION_INCLUSION] [-s SERIES_INCLUSION]
+                    [-xd EXAM_DESCRIPTION_INCLUSION]
+                    [-xm-exclude EXAM_MODALITY_EXCLUSION]
+                    [-xd-exclude EXAM_DESCRIPTION_EXCLUSION]
+                    [-s SERIES_INCLUSION]
+                    [-s-exclude SERIES_EXCLUSION]
                     [--search-only] [-v] [-q]
                     [ACCESSION]
 
@@ -166,10 +186,22 @@ options:
                         Comma-separated list of exam description inclusion
                         patterns (case-insensitive, OR logic). Example: 'BRAIN
                         WITH AND WITHOUT CONTRAST' (default: None)
+  -xm-exclude EXAM_MODALITY_EXCLUSION, --exam_modality_exclusion EXAM_MODALITY_EXCLUSION
+                        Comma-separated list of exam modality exclusion patterns
+                        (case-insensitive, OR logic). Excludes matching exams.
+                        (default: None)
+  -xd-exclude EXAM_DESCRIPTION_EXCLUSION, --exam_description_exclusion EXAM_DESCRIPTION_EXCLUSION
+                        Comma-separated list of exam description exclusion
+                        patterns (case-insensitive, OR logic). Excludes matching
+                        exams. (default: None)
   -s SERIES_INCLUSION, --series_inclusion SERIES_INCLUSION
                         Comma-separated list of series inclusion patterns
                         (case-insensitive, OR logic). Example for T1 type
                         series: 't1,spgr,bravo,mpr' (default: None)
+  -s-exclude SERIES_EXCLUSION, --series_exclusion SERIES_EXCLUSION
+                        Comma-separated list of series exclusion patterns
+                        (case-insensitive, OR logic). Excludes matching series.
+                        (default: None)
   --search-only         Only search for exams matching the provided parameters
                         without downloading. Works with both ACCESSION and
                         --mrn. Prints a summary table to stdout. If -o is
@@ -201,6 +233,23 @@ exams = client.search(mrn="12345", exam_modality_inclusion="MR")
 
 # Search by accession (returns exam details without downloading)
 exams = client.search(accession="11111111")
+
+# Use exclusion filters
+exams = client.search(
+    mrn="12345",
+    exam_modality_inclusion="MR",
+    exam_modality_exclusion="localizer"
+)
+
+# Download with series exclusion
+client.download(
+    accession="11111111",
+    project=5,
+    profile=3,
+    output=Path("output/"),
+    series_inclusion="t1,t2",
+    series_exclusion="scout"
+)
 
 # List projects and profiles
 projects = client.list_projects()

@@ -106,12 +106,39 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
+        "-xm-exclude",
+        "--exam_modality_exclusion",
+        help=(
+            "Comma-separated list of exam modality exclusion patterns "
+            "(case-insensitive, OR logic). Excludes matching exams."
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "-xd-exclude",
+        "--exam_description_exclusion",
+        help=(
+            "Comma-separated list of exam description exclusion patterns "
+            "(case-insensitive, OR logic). Excludes matching exams."
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "-s",
         "--series_inclusion",
         help=(
             "Comma-separated list of series inclusion patterns "
             "(case-insensitive, OR logic). Example for T1 type series: "
             "'t1,spgr,bravo,mpr'"
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "-s-exclude",
+        "--series_exclusion",
+        help=(
+            "Comma-separated list of series exclusion patterns "
+            "(case-insensitive, OR logic). Excludes matching series."
         ),
         default=None,
     )
@@ -242,9 +269,12 @@ def main(args: argparse.Namespace) -> None:
         output=args.output,
         project=args.project,
         profile=args.profile,
-        series_inclusion=args.series_inclusion,
         exam_modality_inclusion=args.exam_modality_inclusion,
         exam_description_inclusion=args.exam_description_inclusion,
+        exam_modality_exclusion=args.exam_modality_exclusion,
+        exam_description_exclusion=args.exam_description_exclusion,
+        series_inclusion=args.series_inclusion,
+        series_exclusion=args.series_exclusion,
         search_only=args.search_only,
     )
 

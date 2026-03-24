@@ -12,7 +12,7 @@ import requests
 from dotenv import dotenv_values
 from tqdm import tqdm
 
-from air_download.filters import apply_inclusion_filter
+from air_download.filters import apply_exclusion_filter, apply_inclusion_filter
 from air_download.utils import build_exam_output_path, write_exams_csv
 
 logger = logging.getLogger(__name__)
@@ -214,6 +214,8 @@ class AIRClient:
         mrn: str | None = None,
         exam_modality_inclusion: str | None = None,
         exam_description_inclusion: str | None = None,
+        exam_modality_exclusion: str | None = None,
+        exam_description_exclusion: str | None = None,
         source_id: int = DEFAULT_SOURCE_ID,
     ) -> list[dict[str, Any]]:
         """Search for exams by accession number or MRN.
@@ -223,6 +225,9 @@ class AIRClient:
             mrn: Patient MRN to search for.
             exam_modality_inclusion: Comma-separated modality filter patterns.
             exam_description_inclusion: Comma-separated description filter
+                patterns.
+            exam_modality_exclusion: Comma-separated modality exclusion patterns.
+            exam_description_exclusion: Comma-separated description exclusion
                 patterns.
             source_id: Data source ID for the query.
 
@@ -256,6 +261,8 @@ class AIRClient:
             exam.pop("patientName", None)
         exams = apply_inclusion_filter(exams, "modality", exam_modality_inclusion)
         exams = apply_inclusion_filter(exams, "description", exam_description_inclusion)
+        exams = apply_exclusion_filter(exams, "modality", exam_modality_exclusion)
+        exams = apply_exclusion_filter(exams, "description", exam_description_exclusion)
 
         if not exams:
             logger.warning("No exams found. Check your search parameters.")
@@ -328,7 +335,10 @@ class AIRClient:
         output: Path | None = None,
         exam_modality_inclusion: str | None = None,
         exam_description_inclusion: str | None = None,
+        exam_modality_exclusion: str | None = None,
+        exam_description_exclusion: str | None = None,
         series_inclusion: str | None = None,
+        series_exclusion: str | None = None,
         search_only: bool = False,
     ) -> list[dict[str, Any]] | None:
         """Search for and download DICOM exams from AIR.
@@ -346,7 +356,12 @@ class AIRClient:
             exam_modality_inclusion: Comma-separated modality filter patterns.
             exam_description_inclusion: Comma-separated description filter
                 patterns.
+            exam_modality_exclusion: Comma-separated modality exclusion patterns.
+            exam_description_exclusion: Comma-separated description exclusion
+                patterns.
             series_inclusion: Comma-separated series description filter
+                patterns.
+            series_exclusion: Comma-separated series description exclusion
                 patterns.
             search_only: If True, write matching exams to CSV and return
                 without downloading.
@@ -360,6 +375,8 @@ class AIRClient:
             mrn=mrn,
             exam_modality_inclusion=exam_modality_inclusion,
             exam_description_inclusion=exam_description_inclusion,
+            exam_modality_exclusion=exam_modality_exclusion,
+            exam_description_exclusion=exam_description_exclusion,
         )
 
         if not exams:
@@ -388,6 +405,7 @@ class AIRClient:
                 project=project,
                 profile=profile,
                 series_inclusion=series_inclusion,
+                series_exclusion=series_exclusion,
             )
 
         return None
@@ -400,6 +418,7 @@ class AIRClient:
         project: int,
         profile: int,
         series_inclusion: str | None,
+        series_exclusion: str | None = None,
     ) -> None:
         """Download a single exam (study) from the API.
 
@@ -410,6 +429,7 @@ class AIRClient:
             project: Project ID.
             profile: Anonymization profile ID.
             series_inclusion: Comma-separated series filter patterns.
+            series_exclusion: Comma-separated series exclusion patterns.
         """
         exam_output_fp = build_exam_output_path(output, study, exam_index)
 
@@ -420,6 +440,7 @@ class AIRClient:
         ).json()
 
         series = apply_inclusion_filter(series, "description", series_inclusion)
+        series = apply_exclusion_filter(series, "description", series_exclusion)
         if not series:
             logger.warning(
                 "No series found for %s. Check your search parameters.",
