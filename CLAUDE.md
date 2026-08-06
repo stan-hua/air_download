@@ -42,6 +42,15 @@ Request flow for every operation is: `cli.py` parses args → constructs `AIRCli
 - `download/zip` is the one call that does **not** use the `Authorization` header — the JWT goes in the form body as `jwt`, per the API.
 - The exam dict returned from search is passed back to the server verbatim as the `study` payload. Do not reshape it; `search()` only pops `patientName` (deliberately, to avoid carrying PHI through the pipeline).
 
+### Two layers of narrowing
+
+Keep these distinct — conflating them is the easiest mistake to make in this codebase:
+
+- **Server-side query parameters** (`modality`, `study_description`, plus `accession`/`mrn`) go into the `query-data-source` payload and decide what the data source returns at all. `modality` must be a single code from `MODALITIES` in `client.py` (mirrored from the spec's enum) and is validated by `normalize_modality` before any network call. A search needs at least one of these four.
+- **Client-side filters** (`*_inclusion` / `*_exclusion`, CLI `-xm`/`-xd`/`-s`) run in `filters.py` after results return and are pure substring matching.
+
+The spec marks `name`, `mrn`, `accNum`, `studyUid`, `studyDescription`, `modality`, `sourceId`, and `dateRange` as required in the query payload — send all of them, empty-string the unused ones. The response's `truncated` flag matters for broad cross-patient searches and is surfaced as a warning; `dateRange` is still hardcoded empty and is the natural next lever for bounding those searches.
+
 ### Configuration resolution
 
 URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.

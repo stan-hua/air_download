@@ -19,6 +19,44 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE_ID = 1
 
+# Modality codes accepted by the `modality` query parameter of
+# /secure/search/query-data-source, per docs/air_open_api.yaml.
+MODALITIES = frozenset(
+    {
+        "AR", "ASMT", "AU", "BDUS", "BI", "BMD", "CR", "CT", "DG", "DOC",
+        "DX", "ECG", "EPS", "ES", "FID", "GM", "HC", "HD", "IO", "IOL",
+        "IVOCT", "IVUS", "KER", "KO", "LEN", "LS", "MG", "MR", "NM", "OAM",
+        "OCT", "OP", "OPM", "OPT", "OPV", "OSS", "OT", "PLAN", "PR", "PT",
+        "PX", "RF", "REG", "RESP", "RTDOSE", "RTIMAGE", "RTPLAN", "RTRECORD",
+        "RTSTRUCT", "RMV", "SEG", "SM", "SR", "SRF", "STAIN", "TG", "US",
+        "VA", "XA", "XC",
+    }
+)
+
+
+def normalize_modality(modality: str | None) -> str:
+    """Validate and upper-case a modality code for the search query.
+
+    Args:
+        modality: Modality code such as ``CT`` or ``us``. May be None or
+            empty, in which case the query is not restricted by modality.
+
+    Returns:
+        The upper-cased modality code, or an empty string if none was given.
+
+    Raises:
+        ValueError: If the code is not one of the modalities the API accepts.
+    """
+    if not modality:
+        return ""
+    normalized = modality.strip().upper()
+    if normalized not in MODALITIES:
+        raise ValueError(
+            f"Unknown modality '{modality}'. The API accepts: "
+            f"{', '.join(sorted(MODALITIES))}."
+        )
+    return normalized
+
 
 class AIRClient:
     """Client for interacting with the AIR (Automated Image Retrieval) API.
@@ -212,17 +250,33 @@ class AIRClient:
         self,
         accession: str | None = None,
         mrn: str | None = None,
+        modality: str | None = None,
+        study_description: str | None = None,
         exam_modality_inclusion: str | None = None,
         exam_description_inclusion: str | None = None,
         exam_modality_exclusion: str | None = None,
         exam_description_exclusion: str | None = None,
         source_id: int = DEFAULT_SOURCE_ID,
     ) -> list[dict[str, Any]]:
-        """Search for exams by accession number or MRN.
+        """Search for exams by accession, MRN, modality, or study description.
+
+        At least one of ``accession``, ``mrn``, ``modality``, or
+        ``study_description`` must be given. ``modality`` and
+        ``study_description`` are sent to the server as query parameters, so
+        they narrow the search across all patients; the ``*_inclusion`` and
+        ``*_exclusion`` arguments are applied client-side to whatever the
+        server returns.
 
         Args:
             accession: Accession number to search for.
             mrn: Patient MRN to search for.
+            modality: Modality code to query the server for (e.g. ``CT``,
+                ``US``). Validated against the codes the API accepts.
+            study_description: Study description to query the server for
+                (e.g. ``CT ABDOMEN PELVIS W CONTRAST``). Matching semantics
+                are decided by the data source; use
+                ``exam_description_inclusion`` for guaranteed substring
+                matching.
             exam_modality_inclusion: Comma-separated modality filter patterns.
             exam_description_inclusion: Comma-separated description filter
                 patterns.
@@ -235,17 +289,23 @@ class AIRClient:
             List of matching exam dictionaries.
 
         Raises:
-            ValueError: If neither accession nor mrn is provided.
+            ValueError: If no search criterion is provided, or if ``modality``
+                is not a code the API accepts.
         """
-        if not accession and not mrn:
-            raise ValueError("Must specify either accession or mrn.")
+        if not any((accession, mrn, modality, study_description)):
+            raise ValueError(
+                "Must specify at least one of: accession, mrn, modality, "
+                "or study_description."
+            )
 
         search_params = {
             "name": "",
             "mrn": mrn or "",
             "accNum": accession or "",
+            "studyUid": "",
+            "studyDescription": study_description or "",
             "dateRange": {"start": "", "end": "", "label": ""},
-            "modality": "",
+            "modality": normalize_modality(modality),
             "sourceId": source_id,
         }
         response = self._post(
@@ -254,8 +314,21 @@ class AIRClient:
             json=search_params,
         ).json()
 
-        exams = response["exams"]
+        if response.get("successful") is False:
+            raise RuntimeError(
+                "Search failed. Server message: "
+                f"{response.get('message', '(none)')}"
+            )
+
+        exams = response.get("exams") or []
         logger.debug("Search returned %d exam(s).", len(exams))
+        if response.get("truncated"):
+            logger.warning(
+                "The data source truncated these results at %d exam(s). "
+                "Narrow the search (e.g. add --study-description or a more "
+                "specific --modality) to see the rest.",
+                len(exams),
+            )
         # Remove patientName from exams
         for exam in exams:
             exam.pop("patientName", None)
@@ -330,6 +403,8 @@ class AIRClient:
         self,
         accession: str | None = None,
         mrn: str | None = None,
+        modality: str | None = None,
+        study_description: str | None = None,
         project: int = -1,
         profile: int = -1,
         output: Path | None = None,
@@ -343,13 +418,17 @@ class AIRClient:
     ) -> list[dict[str, Any]] | None:
         """Search for and download DICOM exams from AIR.
 
-        Supports downloading by accession number (single exam) or by MRN
-        (all exams for a patient). When ``search_only`` is True, writes
+        Supports downloading by accession number (single exam), by MRN (all
+        exams for a patient), or by modality and/or study description (all
+        matching exams across patients). When ``search_only`` is True, writes
         matching exams to a CSV file without downloading.
 
         Args:
             accession: Accession number to download.
             mrn: Patient MRN to download exams for.
+            modality: Modality code to query the server for (e.g. ``CT``).
+            study_description: Study description to query the server for
+                (e.g. ``CT ABDOMEN PELVIS W CONTRAST``).
             project: Project ID.
             profile: Anonymization profile ID.
             output: Output path (directory or .zip file path).
@@ -373,6 +452,8 @@ class AIRClient:
         exams = self.search(
             accession=accession,
             mrn=mrn,
+            modality=modality,
+            study_description=study_description,
             exam_modality_inclusion=exam_modality_inclusion,
             exam_description_inclusion=exam_description_inclusion,
             exam_modality_exclusion=exam_modality_exclusion,
@@ -391,6 +472,14 @@ class AIRClient:
         # Default output to current directory if not specified
         if output is None:
             output = Path(".")
+
+        if not accession and not mrn:
+            logger.warning(
+                "About to download %d exam(s) across multiple patients "
+                "(no accession or MRN given). Re-run with --search-only to "
+                "preview the list first.",
+                len(exams),
+            )
 
         for i, study in tqdm(
             enumerate(exams),

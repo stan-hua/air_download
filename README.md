@@ -126,6 +126,35 @@ pixi run search --mrn 12345 -c ~/air_login.txt -o output/
 pixi run search 11111111    -c ~/air_login.txt -o output/
 ```
 
+**Search all patients by modality and/or study description:**
+
+`--modality` (`-m`) and `--study-description` (`-d`) are sent to the data source as query parameters, so they find matching exams across all patients — no accession or MRN needed:
+
+```bash
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -c ~/air_login.txt
+pixi run search -m US -d "US ED BEDSIDE" -c ~/air_login.txt
+pixi run search -m CT -c ~/air_login.txt -o output/    # every CT, saved to CSV
+```
+
+`--modality` takes a single DICOM modality code (`CT`, `US`, `MR`, …; case-insensitive) and is validated before the request, so typos fail immediately rather than returning nothing. If the data source truncates a broad result set, a warning says so — narrow the query and re-run.
+
+How the server-side query relates to the client-side filters below:
+
+| Flag | Applied | Semantics |
+| --- | --- | --- |
+| `-m` / `--modality` | Server, during the query | One exact modality code |
+| `-d` / `--study-description` | Server, during the query | Whatever matching the data source implements |
+| `-xm`, `-xd`, `-s` (and `-exclude`) | Client, after results return | Case-insensitive substring, comma-separated, OR logic |
+
+Because the data source decides how `-d` matches, pair it with `-xd` when you need matching you can rely on:
+
+```bash
+# Ask the server for CT, then keep only descriptions containing the phrase
+pixi run search -m CT -xd "abdomen pelvis" -c ~/air_login.txt
+```
+
+Both flags work with `pixi run download` too, but a modality-only download pulls every matching exam across patients — preview it with `pixi run search` first.
+
 **Filter by modality, description, or series:**
 
 ```bash
@@ -168,72 +197,84 @@ Run `pixi run download -h` (or `air_download -h`) for the current help text:
 ```
 $ air_download -h
 usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
-                    [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN]
-                    [-xm EXAM_MODALITY_INCLUSION]
+                    [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN] [-m MODALITY]
+                    [-d STUDY_DESCRIPTION] [-xm EXAM_MODALITY_INCLUSION]
                     [-xd EXAM_DESCRIPTION_INCLUSION]
                     [-xm-exclude EXAM_MODALITY_EXCLUSION]
                     [-xd-exclude EXAM_DESCRIPTION_EXCLUSION]
-                    [-s SERIES_INCLUSION]
-                    [-s-exclude SERIES_EXCLUSION]
+                    [-s SERIES_INCLUSION] [-s-exclude SERIES_EXCLUSION]
                     [--search-only] [-v] [-q]
                     [ACCESSION]
 
 Command line interface to the Automated Image Retrieval (AIR) Portal.
 
 positional arguments:
-  ACCESSION             Accession number to search or download. (default: None)
+  ACCESSION             Accession number to search or download. (default:
+                        None)
 
 options:
   -h, --help            show this help message and exit
   --url URL             AIR API URL (e.g. https://air.<domain>.edu/api/). If
                         not provided, resolved from AIR_URL in the credential
-                        file or the AIR_URL environment variable. (default: None)
-  -c CRED_PATH, --cred-path CRED_PATH
-                        Login credentials file (dotenv format with AIR_USERNAME,
-                        AIR_PASSWORD, and optionally AIR_URL). If not provided,
-                        credentials are read from environment variables.
-                        (default: None)
-  -o OUTPUT, --output OUTPUT
-                        Output path or directory. (default: None)
-  -pf PROFILE, --profile PROFILE
+                        file or the AIR_URL environment variable. (default:
+                        None)
+  -c, --cred-path CRED_PATH
+                        Login credentials file (dotenv format with
+                        AIR_USERNAME, AIR_PASSWORD, and optionally AIR_URL).
+                        If not provided, credentials are read from environment
+                        variables. (default: None)
+  -o, --output OUTPUT   Output path or directory. (default: None)
+  -pf, --profile PROFILE
                         Anonymization profile ID. (default: -1)
-  -pj PROJECT, --project PROJECT
+  -pj, --project PROJECT
                         Project ID. (default: -1)
   -lpj, --list-projects
                         List available project IDs. (default: False)
   -lpf, --list-profiles
-                        List available anonymization profiles. (default: False)
-  -mrn MRN, --mrn MRN   Patient MRN (Medical Record Number) to search/download
+                        List available anonymization profiles. (default:
+                        False)
+  -mrn, --mrn MRN       Patient MRN (Medical Record Number) to search/download
                         exams for. (default: None)
-  -xm EXAM_MODALITY_INCLUSION, --exam_modality_inclusion EXAM_MODALITY_INCLUSION
-                        Comma-separated list of exam modality inclusion patterns
-                        (case-insensitive, OR logic). Example: 'MR,CT'
-                        (default: None)
-  -xd EXAM_DESCRIPTION_INCLUSION, --exam_description_inclusion EXAM_DESCRIPTION_INCLUSION
+  -m, --modality MODALITY
+                        Modality to query the server for across all patients
+                        (e.g. 'CT', 'US', 'MR'). Unlike -xm, this is sent to
+                        the data source as a query parameter and must be a
+                        single valid modality code. (default: None)
+  -d, --study-description STUDY_DESCRIPTION
+                        Study description to query the server for across all
+                        patients (e.g. 'CT ABDOMEN PELVIS W CONTRAST').
+                        Matching is performed by the data source; use -xd for
+                        guaranteed case-insensitive substring matching on the
+                        returned exams. (default: None)
+  -xm, --exam_modality_inclusion EXAM_MODALITY_INCLUSION
+                        Comma-separated list of exam modality inclusion
+                        patterns (case-insensitive, OR logic). Example:
+                        'MR,CT' (default: None)
+  -xd, --exam_description_inclusion EXAM_DESCRIPTION_INCLUSION
                         Comma-separated list of exam description inclusion
                         patterns (case-insensitive, OR logic). Example: 'BRAIN
                         WITH AND WITHOUT CONTRAST' (default: None)
-  -xm-exclude EXAM_MODALITY_EXCLUSION, --exam_modality_exclusion EXAM_MODALITY_EXCLUSION
-                        Comma-separated list of exam modality exclusion patterns
-                        (case-insensitive, OR logic). Excludes matching exams.
-                        (default: None)
-  -xd-exclude EXAM_DESCRIPTION_EXCLUSION, --exam_description_exclusion EXAM_DESCRIPTION_EXCLUSION
+  -xm-exclude, --exam_modality_exclusion EXAM_MODALITY_EXCLUSION
+                        Comma-separated list of exam modality exclusion
+                        patterns (case-insensitive, OR logic). Excludes
+                        matching exams. (default: None)
+  -xd-exclude, --exam_description_exclusion EXAM_DESCRIPTION_EXCLUSION
                         Comma-separated list of exam description exclusion
-                        patterns (case-insensitive, OR logic). Excludes matching
-                        exams. (default: None)
-  -s SERIES_INCLUSION, --series_inclusion SERIES_INCLUSION
+                        patterns (case-insensitive, OR logic). Excludes
+                        matching exams. (default: None)
+  -s, --series_inclusion SERIES_INCLUSION
                         Comma-separated list of series inclusion patterns
                         (case-insensitive, OR logic). Example for T1 type
                         series: 't1,spgr,bravo,mpr' (default: None)
-  -s-exclude SERIES_EXCLUSION, --series_exclusion SERIES_EXCLUSION
+  -s-exclude, --series_exclusion SERIES_EXCLUSION
                         Comma-separated list of series exclusion patterns
-                        (case-insensitive, OR logic). Excludes matching series.
-                        (default: None)
+                        (case-insensitive, OR logic). Excludes matching
+                        series. (default: None)
   --search-only         Only search for exams matching the provided parameters
                         without downloading. Works with both ACCESSION and
-                        --mrn. Prints a summary table to stdout. If -o is
-                        also provided, writes results to
-                        <output>/accessions.csv. (default: False)
+                        --mrn. Prints a summary table to stdout. If -o is also
+                        provided, writes results to <output>/accessions.csv.
+                        (default: False)
   -v, --verbose         Enable verbose (DEBUG level) logging. (default: False)
   -q, --quiet           Suppress all output except errors. (default: False)
 ```
@@ -260,6 +301,11 @@ exams = client.search(mrn="12345", exam_modality_inclusion="MR")
 
 # Search by accession (returns exam details without downloading)
 exams = client.search(accession="11111111")
+
+# Search across all patients by modality and/or study description
+exams = client.search(modality="CT", study_description="CT ABDOMEN PELVIS W CONTRAST")
+exams = client.search(modality="US", study_description="US ED BEDSIDE")
+exams = client.search(modality="CT")   # every CT the data source returns
 
 # Use exclusion filters
 exams = client.search(

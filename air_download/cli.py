@@ -87,6 +87,28 @@ def parse_args() -> argparse.Namespace:
         help="Patient MRN (Medical Record Number) to search/download exams for.",
     )
     parser.add_argument(
+        "-m",
+        "--modality",
+        help=(
+            "Modality to query the server for across all patients "
+            "(e.g. 'CT', 'US', 'MR'). Unlike -xm, this is sent to the data "
+            "source as a query parameter and must be a single valid modality "
+            "code."
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "-d",
+        "--study-description",
+        help=(
+            "Study description to query the server for across all patients "
+            "(e.g. 'CT ABDOMEN PELVIS W CONTRAST'). Matching is performed by "
+            "the data source; use -xd for guaranteed case-insensitive "
+            "substring matching on the returned exams."
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "-xm",
         "--exam_modality_inclusion",
         help=(
@@ -175,8 +197,18 @@ def parse_args() -> argparse.Namespace:
     arguments = parser.parse_args()
 
     if not (arguments.list_projects or arguments.list_profiles):
-        if not arguments.acc and not arguments.mrn:
-            parser.error("Must specify either ACCESSION or --mrn.")
+        if not any(
+            (
+                arguments.acc,
+                arguments.mrn,
+                arguments.modality,
+                arguments.study_description,
+            )
+        ):
+            parser.error(
+                "Must specify at least one of: ACCESSION, --mrn, --modality, "
+                "or --study-description."
+            )
 
     return arguments
 
@@ -266,6 +298,8 @@ def main(args: argparse.Namespace) -> None:
     exams = client.download(
         accession=args.acc,
         mrn=args.mrn,
+        modality=args.modality,
+        study_description=args.study_description,
         output=args.output,
         project=args.project,
         profile=args.profile,
