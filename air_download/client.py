@@ -203,27 +203,35 @@ class AIRClient:
             "  3. AIR_URL environment variable"
         )
 
-    def _resolve_profile(self, profile_arg: int | str | None) -> int:
-        """Resolve the anonymization profile from argument, file, or environment.
+    def _resolve_id(
+        self,
+        value: int | str | None,
+        env_key: str,
+        label: str,
+        list_flag: str,
+    ) -> int:
+        """Resolve a numeric setting from argument, credential file, or environment.
 
         Args:
-            profile_arg: Explicit profile passed by the caller (highest
-                priority). None means "use the configured default".
+            value: Explicit value passed by the caller (highest priority).
+                None means "use the configured default".
+            env_key: Key to look up in the credential file and environment.
+            label: Human-readable name of the setting, for error messages.
+            list_flag: CLI flag that lists valid IDs, for error messages.
 
         Returns:
-            The resolved profile ID, or -1 if none is configured.
+            The resolved ID, or -1 if none is configured.
 
         Raises:
             ValueError: If the resolved value is not an integer.
         """
         source = "argument"
-        value = profile_arg
         if value is None:
-            value = self._envs.get("AIR_PROFILE")
-            source = f"AIR_PROFILE in {self._cred_path}"
+            value = self._envs.get(env_key)
+            source = f"{env_key} in {self._cred_path}"
         if value is None:
-            value = os.environ.get("AIR_PROFILE")
-            source = "AIR_PROFILE environment variable"
+            value = os.environ.get(env_key)
+            source = f"{env_key} environment variable"
         if value is None or value == "":
             return -1
 
@@ -231,9 +239,22 @@ class AIRClient:
             return int(value)
         except (TypeError, ValueError):
             raise ValueError(
-                f"Anonymization profile must be an integer, got {value!r} "
-                f"from {source}. Run with -lpf to list valid profile IDs."
+                f"{label} must be an integer, got {value!r} from {source}. "
+                f"Run with {list_flag} to list valid IDs."
             ) from None
+
+    def _resolve_profile(self, profile_arg: int | str | None) -> int:
+        """Resolve the anonymization profile from argument, file, or environment.
+
+        Args:
+            profile_arg: Explicit profile passed by the caller, or None.
+
+        Returns:
+            The resolved profile ID, or -1 if none is configured.
+        """
+        return self._resolve_id(
+            profile_arg, "AIR_PROFILE", "Anonymization profile", "-lpf"
+        )
 
     def _get_credentials(self) -> tuple[str, str]:
         """Resolve username and password from credential file or environment.
