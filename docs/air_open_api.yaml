@@ -1,0 +1,744 @@
+openapi: 3.0.2
+info:
+  title: 'AIR: The Automated Image Retrieval Portal'
+  description: "## API for working with the AIR portal\n\
+    This document describes the web API for querying for and retrieving DICOM images \
+    via the AIR portal. The API is specified using the [OpenAPI Specification (OAS)](https://www.openapis.org/) v3.0.3. \
+    For more information about OAS see: [http://spec.openapis.org/oas/v3.0.3](http://spec.openapis.org/oas/v3.0.3). \n\
+    \n---\n\n\
+    ### Usage\n\n\
+    This section describes how to test out the API using this demo page.  \
+    For a sample client using Python please see: [https://github.com/rauschecker-sugrue-labs/air_download](https://github.com/rauschecker-sugrue-labs/air_download). \
+    You can also use the OpenAPI generator tool to create a client in your preferred language: [https://github.com/OpenAPITools/openapi-generator](https://github.com/OpenAPITools/openapi-generator)\n\
+    #### Authentication\n\n\
+    All API calls require the use of a HTTP Bearer token.  To obtain the token start by using the `/login` API call to authenticate.  \
+    When you get back a sucessful login response, the token will be in the `jwt` key: \n\n\
+    > ``` \n\
+    > { \n\
+    > \t\"successful\": true,\n\
+    > \t\"sources\": [\n\
+    > \t\t{\n\
+    > \t\t\t\"name\": \"PACS\"\n\
+    > \t\t\t\"id\": 1\n\
+    > \t\t}\n\
+    > \t],\n\
+    > \t.\n\
+    > \t.\n\
+    > \t.\n\
+    > \t\"token\": {\n\
+    > \t\t\"jwt\": \"eyJraWQiOiIxNDkyNzI3ODE4MDc1IiwiYWxnIjoiUlMyNTYifQ...\"\n\
+    > \t}\n\
+    > } \n\
+    > ``` \n\
+    Once you have your token click the **Authorize** button and enter it when prompted. \
+    Your token will now be used for all subsequent requests.\n\n\
+    #### Obtaining Study Metadata ####\n\n\
+    Once you have your token configured you will next need to query for the metadata of the study you want to download.  \
+    To begin use the `/secure/search/query-data-source` API call to find the study of interest.  \
+    You will need to set the `sourceId` in the request to the id of one of the sources from the login response.  \
+    While the query API accepts a variety of different parameters, it is recommended you use an \
+    accession number you know is on PACS to test the API.  The query will return a result object \
+    containing an array of matching studies in the `exams` key: \n\n\
+    > ``` \n\
+    > { \n\
+    > \t\"successful\": true,\n\
+    > \t.\n\
+    > \t.\n\
+    > \t.\n\
+    > \t\"exams\": [\n\
+    > \t\t{\n\
+    > \t\t\t\"patientName\": \"TEST, PATIENT\",\n\
+    > \t\t\t\"patientId\": \"01234561\",\n\
+    > \t\t\t\"birthdate\": \"2020-10-20\",\n\
+    > \t\t\t\"sex\": \"M\",\n\
+    > \t\t\t\"accessionNumber\": \"1234567\",\n\
+    > \t\t\t\"dateTime\": \"2017-04-20T13:58:25.000-07:00\",\n\
+    > \t\t\t\"description\": \"XR CHEST 1 VIEW AP\",\n\
+    > \t\t\t\"modality\": \"CR\",\n\
+    > \t\t\t\"imageCount\": 4,\n\
+    > \t\t\t\"studyUid\": \"1.2.3.4\",\n\
+    > \t\t\t\"deviceId\": 0,\n\
+    > \t\t\t\"viewable\": true,\n\
+    > \t\t\t\"online\": true\n\
+    > \t\t}\n\
+    > \t]\n\
+    > } \n\
+    > ``` \n\
+    Once you have identified the study you want to retrieve you will need to query \
+    for the associated series using the `/secure/search/series` API call.  Simply pass \
+    the selected study object as the request:\n\n\
+    > ``` \n\
+    > {\n\
+    > \t\"patientName\": \"TEST, PATIENT\",\n\
+    > \t\"patientId\": \"01234561\",\n\
+    > \t\"birthdate\": \"2020-10-20\",\n\
+    > \t\"sex\": \"M\",\n\
+    > \t\"accessionNumber\": \"1234567\",\n\
+    > \t\"dateTime\": \"2017-04-20T13:58:25.000-07:00\",\n\
+    > \t\"description\": \"XR CHEST 1 VIEW AP\",\n\
+    > \t\"modality\": \"CR\",\n\
+    > \t\"imageCount\": 4,\n\
+    > \t\"studyUid\": \"1.2.3.4\",\n\
+    > \t\"deviceId\": 0,\n\
+    > \t\"viewable\": true,\n\
+    > \t\"online\": true\n\
+    > }\n\
+    > ``` \n\
+    and you will receive back an array containing all the series within that study:\n\n\
+    > ``` \n\
+    > [\n\
+    > \t{\n\
+    > \t\t\"description\": \"AP\",\n\
+    > \t\t\"imageCount\": 2,\n\
+    > \t\t\"modality\": \"DX\",\n\
+    > \t\t\"seriesNumber\": \"001\",\n\
+    > \t\t\"seriesUid\": \"1.2.3.4\"\n\
+    > \t},\n\    
+    > \t{\n\
+    > \t\t\"description\": \"Lateral\",\n\
+    > \t\t\"imageCount\": 2,\n\
+    > \t\t\"modality\": \"DX\",\n\
+    > \t\t\"seriesNumber\": \"002\",\n\
+    > \t\t\"seriesUid\": \"5.6.7.8\"\n\
+    > \t}\n\
+    > ]\n\
+    > ``` \n\
+    You now have all the necessary meta-data to continue to the process of retrieval. \n\n\
+    #### Downloading Images ####\n\
+    Since the retrieval of images from the backend datasources is asynchronous, the AIR \
+    portal API uses a polling mechanism to allow clients to queue images for \
+    retrieval and to be notified when they are ready to download. \ 
+    The process begins with the `/secure/search/download/start` API call, which \
+    takes a request object as its parameter:\n\n\
+    > ``` \n\
+    > {\n\
+    > \t\"projectId\": -1,\n\
+    > \t\"profileId\": -1,\n\
+    > \t\"decompress\": false,\n\
+    > \t\"includeLog\": false,\n\
+    > \t\"study\": {\n\
+    > \t\t\"patientId\": \"01234561\",\n\
+    > \t\t\"accessionNumber\": \"1234567\",\n\
+    > \t\t\"studyUid\": \"1.2.3.4\",\n\
+    > \t\t\"deviceId\": 10\n\
+    > \t},\n\
+    > \t\"series\": [\n\
+    > \t\t{\n\
+    > \t\t\"seriesUid\": \"1.2.3.4.5\"\n\
+    > \t\t},\n\
+    > \t\t{\n\
+    > \t\t\"seriesUid\": \"5.6.7.8\"\n\
+    > \t\t}\n\
+    > \t]\n\
+    > }\n\
+    > ``` \n\
+    The study and series attributes are populated using the metadata obtained above. \
+    *Note: You do not need to download all series.  You can choose to only include \
+    the UIDs of the series you're interested in downloading. \
+    Downloading only the series you need can significantly reduce the amount of data \
+    that needs to be retrieved and will speed up the download process.* \
+    The `start` API call will queue the request and return a response containing the download id:\n\n\
+    > ``` \n\
+    > {\n\
+    > \t\"downloadId\": 123456,\n\
+    > \t\"status\": \"pending\"\n\
+    > }\n\
+    > ``` \n\
+    Clients should then use the `/secure/search/download/check` API call to periodically check \
+    (*recommended interval is 10 secs*) the status of their request using the download id obtained above. \
+    When the status returned is **started** or **completed** it means there are images available \
+    for download and the client should proceed with calling the `/secure/search/download/zip` method \
+    to start downloading the images in a ZIP archive. \n\
+    \n---\n\n\
+    "
+  contact:
+    email: air-support-ext@ucsf.edu
+    name: AIR Application Support
+
+  license:
+    name: Copyright UC Regents
+    url: http://copyright.universityofcalifornia.edu/
+  version: 1.0.0
+servers:
+- url: https://zsfg-air.ucsf.edu/api
+tags:
+- name: Authentication
+  description: APIs for authentication
+- name: Query
+  description: APIs for querying data sources
+- name: Retrieve
+  description: APIs for retrieving from data sources
+paths:
+  /login:
+    post:
+      tags:
+      - Authentication
+      summary: Authenticates a user and returns a JWT token for API access
+      requestBody:
+        description: User name and password for authentication
+        content:
+          application/json:
+            schema:
+              required:
+              - password
+              - userId
+              type: object
+              properties:
+                userId:
+                  type: string
+                  description: The login name to authenticate
+                  example: ""
+                password:
+                  type: string
+                  description: The password to use for authenticaiton
+                  example: ""
+        required: true
+      responses:
+        200:
+          description: Authentication result
+          content:
+            application/json:
+              schema:
+                required:
+                - successful
+                type: object
+                properties:
+                  successful:
+                    type: boolean
+                    description: Indicates if the authentication process was successful
+                  user:
+                    $ref: '#/components/schemas/Account'
+                  token:
+                    type: object
+                    properties:
+                      expires:
+                        type: string
+                        description: The date/time in ISO 8601 of when this token
+                          expires
+                        format: dateTime
+                        example: 2017-04-20T16:06:57-07:00
+                      jwt:
+                        type: string
+                        description: The JWT token for authorizing subsequent request
+                        example: eyJraWQiOiIxNDkyNzI3ODE4MDc1IiwiYWxnIjoiUlMyNTYifQ...
+        default:
+          description: Server error
+          content: {}
+  /secure/search/query-data-source:
+    post:
+      tags:
+      - Query
+      summary: Queries a specified data source for DICOM studies
+      requestBody:
+        description: Query parameters
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - mrn
+                - accNum
+                - studyUid
+                - studyDescription
+                - modality
+                - sourceId
+                - dateRange
+              properties:
+                name:
+                  type: string
+                  description: The patient name to query for
+                  example: "TEST^PATIENT"
+                mrn:
+                  type: string
+                  description: The medical record number to query for
+                  example: "01234561"
+                accNum:
+                  type: string
+                  description: The accession number to query for
+                  example: "abcdefg"
+                studyUid:
+                  type: string
+                  description: The DICOM study UID to query for
+                  example: "1.22.333.4444.55555"
+                studyDescription:
+                  type: string
+                  description: The study description to query for
+                  example: "CT HEAD"
+                modality:
+                  type: string
+                  description: The modality to query for
+                  enum:
+                  - AR
+                  - ASMT
+                  - AU
+                  - BDUS
+                  - BI
+                  - BMD
+                  - CR
+                  - CT
+                  - DG
+                  - DOC
+                  - DX
+                  - ECG
+                  - EPS
+                  - ES
+                  - FID
+                  - GM
+                  - HC
+                  - HD
+                  - IO
+                  - IOL
+                  - IVOCT
+                  - IVUS
+                  - KER
+                  - KO
+                  - LEN
+                  - LS
+                  - MG
+                  - MR
+                  - NM
+                  - OAM
+                  - OCT
+                  - OP
+                  - OPM
+                  - OPT
+                  - OPV
+                  - OSS
+                  - OT
+                  - PLAN
+                  - PR
+                  - PT
+                  - PX
+                  - RF
+                  - REG
+                  - RESP
+                  - RTDOSE
+                  - RTIMAGE
+                  - RTPLAN
+                  - RTRECORD
+                  - RTSTRUCT
+                  - RMV
+                  - SEG
+                  - SM
+                  - SR
+                  - SRF
+                  - STAIN
+                  - TG
+                  - US
+                  - VA
+                  - XA
+                  - XC
+                  example: "CR"
+                sourceId:
+                  type: integer
+                  description: The data source id to search against
+                  example: 1
+                dateRange:
+                  type: object
+                  description: The date range to query for
+                  properties:
+                    start:
+                      type: string
+                      description: "The start date/time in one of the following ISO 8601 compliant formats:\n\
+                      - yyyy-MM-dd'T'HH:mm:ss.SSSXXX (e.g. 2020-06-09T00:00:00.000-07:00)\n\
+                      - yyyy-MM-dd'T'HH:mm:ssXXX (e.g. 2020-06-09T00:00:00-07:00)\n\
+                      - yyyy-MM-dd'T'HH:mmXXX (e.g. 2020-06-09T00:00-07:00)\n\
+                      - yyyy-MM-dd (e.g. 2020-06-09)\n\
+                      "
+                      format: dateTime
+                      example: "2020-06-09T00:00:00-07:00"
+                    end:
+                      type: string
+                      description: "The end date/time in one of the following ISO 8601 compliant formats:\n\
+                      - yyyy-MM-dd'T'HH:mm:ss.SSSXXX (e.g. 2020-06-09T00:00:00.000-07:00)\n\
+                      - yyyy-MM-dd'T'HH:mm:ssXXX (e.g. 2020-06-09T00:00:00-07:00)\n\
+                      - yyyy-MM-dd'T'HH:mmXXX (e.g. 2020-06-09T00:00-07:00)\n\
+                      - yyyy-MM-dd (e.g. 2020-06-09)\n\
+                      "
+                      format: dateTime
+                      example: "2020-06-10T00:00:00-07:00"
+        required: true
+      responses:
+        200:
+          description: Query results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  successful:
+                    type: boolean
+                    description: Indicates if the query completed without error
+                  truncated:
+                    type: boolean
+                    description: Indicates if the query results were truncated
+                  message:
+                    type: string
+                    description: Error message returned by the data source
+                  exams:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DicomStudy'
+      security:
+      - token: []
+  /secure/search/series:
+    post:
+      tags: 
+      - Query
+      summary: Query for the series associated with a single study
+      requestBody:
+        description: DICOM study
+        content:
+          application/json:
+           schema:
+             $ref: '#/components/schemas/DicomStudy'
+        required: true
+      responses:
+        200:
+          description: Array of DICOM series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DicomSeries'
+      security:
+      - token: []
+  /secure/search/download/start:
+    post:
+      tags: 
+        - Retrieve
+      summary: Starts the process of downloading the selected series within a study
+      requestBody:
+        description: Download request
+        content:
+          application/json:
+           schema:
+              type: object
+              properties:
+                projectId:
+                  type: integer
+                  description: "The id of the project to associate with this request.  The project id can be obtained from the \"projects\" array in the login response. Use -1 if there is no project associated with this request. "
+                  default: -1
+                  example: -1
+                profileId:
+                  type: integer
+                  description: "The id of the anonymization profile to use for anonymizing the objects within this request.  The profile id can be obtained from the \"profiles\" array in the login response. Use -1 if you do not want to use anonymization. "
+                  default: -1
+                  example: -1
+                decompress:
+                  type: boolean
+                  description: Toggle whether or not the images should be decompressed when downloading
+                  default: false
+                includeLog:
+                  type: boolean
+                  description: Toggle whether or not to include an Excel spreadsheet containing a log of the study and series that are contained in the ZIP archive
+                  default: false
+                study:
+                  type: object
+                  description: The study the selected series belong to
+                  properties:
+                    patientId:
+                      type: string
+                      description: The patient's medical record number
+                      example: "01234561"
+                    accessionNumber:
+                      type: string
+                      description: The accession number of this study
+                      example: "1234567"
+                    studyUid:
+                      type: string
+                      description: The DICOM study UID of this study
+                      example: "1.2.3.4"
+                    deviceId:
+                      type: integer
+                      description: The unique database id of the device on which this study is stored
+                      example: 10
+                series:
+                  type: array
+                  description: The selected series to download
+                  items:
+                    type: object
+                    properties:
+                      seriesUid:
+                        type: string
+                        example: "1.2.3.4.5"
+        required: true
+      responses:
+        200:
+          description: Download request status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadRequestStatus'
+        543:
+          description: If there was an error starting the download process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - token: []
+  /secure/search/download/check:
+    post:
+      tags: 
+        - Retrieve
+      summary: Checks the status of an existing download request. Clients should periodically call this method until the status is either started, completed or failed. 
+      requestBody:
+        description: Download id
+        content:
+          application/json:
+           schema:
+              type: object
+              properties:                  
+                downloadId:
+                  type: integer
+                  description: The id obtained when the download was started
+                  example: 123456
+              required: 
+                - downloadId
+        required: true
+      responses:
+        200:
+          description: Download request status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadRequestStatus'
+      security:
+      - token: []
+  /secure/search/download/cancel:
+    post:
+      tags: 
+        - Retrieve
+      summary: Cancels an in progress download request. 
+      requestBody:
+        description: Download id
+        content:
+          application/json:
+           schema:
+              type: object
+              properties:                  
+                downloadId:
+                  type: integer
+                  description: The id obtained when the download was started
+                  example: 123456
+              required: 
+                - downloadId
+        required: true
+      responses:
+        200:
+          description: Download request status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadRequestStatus'
+      security:
+      - token: []
+  /secure/search/download/zip:
+    post:
+      tags: 
+        - Retrieve
+      summary: Starts downloading the images as a ZIP archive.  Clients should call this method when the request status is started or completed. 
+      requestBody:
+        description: Download id
+        content:
+          application/json:
+           schema:
+              type: object
+              properties:                  
+                downloadId:
+                  type: integer
+                  description: The id obtained when the download was started
+                  example: 123456
+              required:
+                - downloadId
+        required: true
+      responses:
+        200:
+          description: A ZIP archive containing the requested series
+      security:
+      - token: []
+              
+components:
+  schemas:
+    Account:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The unique database id for this account
+          example: 123
+        loginName:
+          type: string
+          description: The login name for this account
+          example: jsmith
+        fullName:
+          type: string
+          description: The full name of the user associated with this account
+          example: Smith, John
+        email:
+          type: string
+          description: The email address of the user associated with this account
+        sources:
+          type: array
+          description: The data sources this user has access to
+          items:
+            $ref: '#/components/schemas/DataSource'
+        projects:
+          type: array
+          description: The projects this user has access to
+          items:
+            $ref: '#/components/schemas/Project'
+        profiles:
+          type: array
+          description: The anonymization profiles this user has access to
+          items:
+            $ref: '#/components/schemas/AnonymizationProfile'
+    AnonymizationProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The unique database id for this profile
+          example: 3
+        name:
+          type: string
+          description: The human friendly name for this profile
+          example: "My Anonymization Profile"
+        description:
+          type: string
+          description: The description (if any) of this profile
+          example: "This is an anonymization profile description"
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: Operation specific error code
+          example: -1
+        reason:
+          type: string
+          description: The reason for the error
+          example: Unable to start download
+        details:
+          type: object
+          description: Detailed information on the error
+    DataSource:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The unique database id for this datasource
+          example: 2
+        name:
+          type: string
+          description: The human friendly name for this datasource
+          example: Clinical PACS
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The unique database id for this project
+          example: 3
+        name:
+          type: string
+          description: The human friendly name for this project
+          example: "My Project"
+    DicomStudy:
+      type: object
+      properties:
+        patientName:
+          type: string
+          description: The patient name
+          example: "TEST, PATIENT"
+        patientId:
+          type: string
+          description: The patient's medical record number
+          example: "01234561"
+        birthdate:
+          type: string
+          description: Patient's birthdate in ISO 8601 format
+          format: date
+        sex:
+          type: string
+          description: The patient's sex
+          example: "M"
+        accessionNumber:
+          type: string
+          description: The accession number of this study
+          example: "1234567"
+        dateTime:
+          type: string
+          description: The date/time in ISO 8061 format of when this exam was acquired
+          format: date-time
+          example: "2017-04-20T13:58:25.000-07:00"
+        description:
+          type: string
+          description: The exam description of this study
+          example: "XR CHEST 1 VIEW AP"
+        modality:
+          type: string
+          description: The exam modality
+          example: CR
+        imageCount:
+          type: integer
+          description: The number of objects in this study
+          example: 4
+        studyUid:
+          type: string
+          description: The DICOM study UID of this study
+          example: "1.2.3.4"
+        deviceId:
+          type: integer
+          description: The unique database id of the device on which this study is
+            stored
+        viewable:
+          type: boolean
+          description: Indicates if this study can displayed
+        online:
+          type: boolean
+          description: Hint indicating if this study can be quickly retrieved
+    DicomSeries:
+      type: object
+      properties:
+        description:
+          type: string
+          description: The series description
+          example: AP
+        imageCount:
+          type: integer
+          description: The number of objects in this series
+          example: 2
+        modality:
+          type: string
+          description: The series modality
+          example: CR
+        seriesNumber:
+          type: string
+          description: The series number for this series
+          example: "001"
+        seriesUid:
+          type: string
+          description: The DICOM series UID
+          example: "1.2.3.4"
+        study:
+          $ref: '#/components/schemas/DicomStudy'
+    DownloadRequestStatus:
+      type: object
+      properties:
+        downloadId:
+          type: integer
+          description: The download ticket id.  Use this id to check on the status of a download and to start downloading the requested series when they're ready.
+          example: 123456
+        status:
+          type: string
+          description: "The status of the download request. Possible values are: pending, started, completed, canceled, failed and expired. "
+          example: pending
+  securitySchemes:
+    token:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
