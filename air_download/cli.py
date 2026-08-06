@@ -71,8 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-pj",
         "--project",
-        help="Project ID.",
-        default=-1,
+        type=int,
+        help=(
+            "Project ID. If omitted, read from AIR_PROJECT in the credential "
+            "file or the AIR_PROJECT environment variable."
+        ),
+        default=None,
     )
     parser.add_argument(
         "-lpj",

@@ -63,9 +63,9 @@ The data source caps results per query, so `search()` never issues one request. 
 
 ### Configuration resolution
 
-URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Anonymization profile: `-pf`/`profile=` → `AIR_PROFILE` in credential file → `AIR_PROFILE` env var → `-1`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
+URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Project and profile: `-pj`/`-pf` → `AIR_PROJECT`/`AIR_PROFILE` in credential file → same env vars → `-1`, both via the shared `_resolve_id`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
 
-`-pf` and `download(profile=...)` default to `None`, not `-1` — that is what distinguishes "not supplied, go look at the config" from "explicitly no profile". Don't reintroduce `-1` as the default or the fallback stops working.
+`-pj`, `-pf`, and `download(project=..., profile=...)` default to `None`, not `-1` — that is what distinguishes "not supplied, go look at the config" from "explicitly no project/profile". Don't reintroduce `-1` as the default or the fallback stops working. Both resolve at the top of `download()` and only when actually downloading, so a bad value fails before a long chunked search rather than after it, and `--search-only` (which needs neither) is unaffected.
 
 ### Retries
 

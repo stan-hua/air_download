@@ -58,6 +58,7 @@ Login credentials and the API URL are stored in a dotenv-style plain text file (
 AIR_USERNAME=username
 AIR_PASSWORD=password
 AIR_URL=https://air.<domain>.edu/api/
+AIR_PROJECT=5
 AIR_PROFILE=3
 ```
 
@@ -78,13 +79,13 @@ The **URL** is resolved from (in priority order):
 1. Credential file (`AIR_USERNAME` / `AIR_PASSWORD`)
 2. Environment variables (`AIR_USERNAME` / `AIR_PASSWORD`)
 
-The **anonymization profile** (`AIR_PROFILE`, an integer) is resolved from:
+The **project** (`AIR_PROJECT`) and **anonymization profile** (`AIR_PROFILE`), both integers, are each resolved from:
 
-1. `-pf` / `--profile` CLI flag
-2. `AIR_PROFILE` in the credential file
-3. `AIR_PROFILE` environment variable
+1. `-pj` / `--project` and `-pf` / `--profile` CLI flags
+2. `AIR_PROJECT` / `AIR_PROFILE` in the credential file
+3. `AIR_PROJECT` / `AIR_PROFILE` environment variables
 
-Set it once and you can drop `-pf` from every command. `pixi run list-profiles` shows the valid IDs. A non-integer value fails immediately, naming where it came from.
+Set them once and you can drop `-pj` and `-pf` from every command. `pixi run list-projects` and `pixi run list-profiles` show the valid IDs. A non-integer value fails immediately, naming where it came from. Neither is needed for `--search-only`.
 
 Setting these as environment variables (alternative to the file):
 
@@ -92,6 +93,7 @@ Setting these as environment variables (alternative to the file):
 export AIR_USERNAME=username
 export AIR_PASSWORD=password
 export AIR_URL=https://air.<domain>.edu/api/
+export AIR_PROJECT=5
 export AIR_PROFILE=3
 ```
 
@@ -122,7 +124,11 @@ air_download     11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3   # standalo
 pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -pj 5 -pf 3
 ```
 
-With `AIR_PROFILE` set in the credential file you can drop `-pf` entirely — see [Credentials and URL configuration](#credentials-and-url-configuration).
+With `AIR_PROJECT` and `AIR_PROFILE` set in the credential file you can drop `-pj` and `-pf` entirely — see [Credentials and URL configuration](#credentials-and-url-configuration):
+
+```bash
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/
+```
 
 **Search/list available exams for a patient or accession (no download):**
 
@@ -283,7 +289,9 @@ options:
                         AIR_PROFILE in the credential file or the AIR_PROFILE
                         environment variable. (default: None)
   -pj, --project PROJECT
-                        Project ID. (default: -1)
+                        Project ID. If omitted, read from AIR_PROJECT in the
+                        credential file or the AIR_PROJECT environment
+                        variable. (default: None)
   -lpj, --list-projects
                         List available project IDs. (default: False)
   -lpf, --list-profiles
@@ -361,11 +369,11 @@ You can also use `air_download` as a library:
 from pathlib import Path
 from air_download import AIRClient
 
-# URL + credentials (+ optional AIR_PROFILE) resolved from the credential file
+# URL, credentials, and optional AIR_PROJECT / AIR_PROFILE come from the file
 client = AIRClient(cred_path="/path/to/air_login.txt")
 
-# Omit `profile` to use AIR_PROFILE from the credential file or environment
-client.download(accession="11111111", project=5, output=Path("output/"))
+# Omit `project` and `profile` to use AIR_PROJECT / AIR_PROFILE
+client.download(accession="11111111", output=Path("output/"))
 
 # Download a single exam by accession
 client.download(accession="11111111", project=5, profile=3, output=Path("output/"))

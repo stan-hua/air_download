@@ -119,10 +119,10 @@ class AIRClient:
         1. Credential file (``AIR_USERNAME`` / ``AIR_PASSWORD``)
         2. Environment variables (``AIR_USERNAME`` / ``AIR_PASSWORD``)
 
-    Resolution order for the anonymization profile:
-        1. ``profile`` argument passed to :meth:`download`
-        2. ``AIR_PROFILE`` in the credential file
-        3. ``AIR_PROFILE`` environment variable
+    Resolution order for the project and anonymization profile:
+        1. ``project`` / ``profile`` argument passed to :meth:`download`
+        2. ``AIR_PROJECT`` / ``AIR_PROFILE`` in the credential file
+        3. ``AIR_PROJECT`` / ``AIR_PROFILE`` environment variable
 
     Transient failures (connection errors, timeouts, and the status codes in
     ``RETRY_STATUS_CODES``) are retried with exponential backoff, honouring a
@@ -132,9 +132,9 @@ class AIRClient:
         url: AIR API base URL. If not provided, resolved from credential
             file or ``AIR_URL`` environment variable.
         cred_path: Path to a dotenv-style credential file containing
-            ``AIR_USERNAME``, ``AIR_PASSWORD``, and optionally ``AIR_URL``
-            and ``AIR_PROFILE``. If None, values are read from environment
-            variables.
+            ``AIR_USERNAME``, ``AIR_PASSWORD``, and optionally ``AIR_URL``,
+            ``AIR_PROJECT`` and ``AIR_PROFILE``. If None, values are read
+            from environment variables.
         max_retries: Number of retries after the initial attempt. Zero
             disables retrying.
         backoff_factor: Delay in seconds before the first retry; each
@@ -255,6 +255,17 @@ class AIRClient:
         return self._resolve_id(
             profile_arg, "AIR_PROFILE", "Anonymization profile", "-lpf"
         )
+
+    def _resolve_project(self, project_arg: int | str | None) -> int:
+        """Resolve the project ID from argument, file, or environment.
+
+        Args:
+            project_arg: Explicit project passed by the caller, or None.
+
+        Returns:
+            The resolved project ID, or -1 if none is configured.
+        """
+        return self._resolve_id(project_arg, "AIR_PROJECT", "Project ID", "-lpj")
 
     def _get_credentials(self) -> tuple[str, str]:
         """Resolve username and password from credential file or environment.
@@ -651,7 +662,7 @@ class AIRClient:
         date_start: str | None = None,
         date_end: str | None = None,
         chunk_days: int = DEFAULT_CHUNK_DAYS,
-        project: int = -1,
+        project: int | None = None,
         profile: int | None = None,
         output: Path | None = None,
         exam_modality_inclusion: str | None = None,
@@ -679,7 +690,8 @@ class AIRClient:
             date_end: End of the date window, ISO 8601. Defaults to the
                 current time when ``date_start`` is given.
             chunk_days: Maximum span of a single search query, in days.
-            project: Project ID.
+            project: Project ID. When None, falls back to ``AIR_PROJECT``
+                from the credential file or environment.
             profile: Anonymization profile ID. When None, falls back to
                 ``AIR_PROFILE`` from the credential file or environment.
             output: Output path (directory or .zip file path).
@@ -700,11 +712,16 @@ class AIRClient:
             List of exam dictionaries if ``search_only`` is True, None
             otherwise.
         """
-        # Resolve before searching so a misconfigured AIR_PROFILE fails now
-        # rather than after a long chunked search.
-        resolved_profile = -1
+        # Resolve before searching so a misconfigured AIR_PROJECT or
+        # AIR_PROFILE fails now rather than after a long chunked search.
+        resolved_project, resolved_profile = -1, -1
         if not search_only:
+            resolved_project = self._resolve_project(project)
             resolved_profile = self._resolve_profile(profile)
+            if project is None and resolved_project != -1:
+                logger.info(
+                    "Using project %d from configuration.", resolved_project
+                )
             if profile is None and resolved_profile != -1:
                 logger.info(
                     "Using anonymization profile %d from configuration.",
@@ -756,7 +773,7 @@ class AIRClient:
                 study=study,
                 exam_index=i,
                 output=output,
-                project=project,
+                project=resolved_project,
                 profile=resolved_profile,
                 series_inclusion=series_inclusion,
                 series_exclusion=series_exclusion,

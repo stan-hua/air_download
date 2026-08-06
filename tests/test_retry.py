@@ -262,8 +262,55 @@ class TestResolveProfile:
         assert AIRClient(cred_path=cred_file)._resolve_profile(-1) == -1
 
 
-class TestDownloadUsesConfiguredProfile:
-    """Tests that download() applies the resolved profile."""
+class TestResolveProject:
+    """Tests for project ID resolution."""
+
+    def test_argument_wins(self, tmp_path, monkeypatch):
+        cred = tmp_path / "creds.txt"
+        cred.write_text(
+            "AIR_USERNAME=u\nAIR_PASSWORD=p\n"
+            "AIR_URL=https://example.com/api/\nAIR_PROJECT=7\n"
+        )
+        monkeypatch.setenv("AIR_PROJECT", "9")
+        assert AIRClient(cred_path=cred)._resolve_project(3) == 3
+
+    def test_credential_file_beats_environment(self, tmp_path, monkeypatch):
+        cred = tmp_path / "creds.txt"
+        cred.write_text(
+            "AIR_USERNAME=u\nAIR_PASSWORD=p\n"
+            "AIR_URL=https://example.com/api/\nAIR_PROJECT=7\n"
+        )
+        monkeypatch.setenv("AIR_PROJECT", "9")
+        assert AIRClient(cred_path=cred)._resolve_project(None) == 7
+
+    def test_environment_used_without_file_entry(self, cred_file, monkeypatch):
+        monkeypatch.setenv("AIR_PROJECT", "9")
+        assert AIRClient(cred_path=cred_file)._resolve_project(None) == 9
+
+    def test_defaults_to_minus_one(self, cred_file, monkeypatch):
+        monkeypatch.delenv("AIR_PROJECT", raising=False)
+        assert AIRClient(cred_path=cred_file)._resolve_project(None) == -1
+
+    def test_non_integer_raises_naming_the_project_flag(self, cred_file, monkeypatch):
+        monkeypatch.setenv("AIR_PROJECT", "my-project")
+        with pytest.raises(ValueError, match="Project ID must be an integer"):
+            AIRClient(cred_path=cred_file)._resolve_project(None)
+        with pytest.raises(ValueError, match="-lpj"):
+            AIRClient(cred_path=cred_file)._resolve_project(None)
+
+    def test_project_and_profile_are_independent(self, tmp_path, monkeypatch):
+        cred = tmp_path / "creds.txt"
+        cred.write_text(
+            "AIR_USERNAME=u\nAIR_PASSWORD=p\nAIR_URL=https://example.com/api/\n"
+            "AIR_PROJECT=5\nAIR_PROFILE=3\n"
+        )
+        client = AIRClient(cred_path=cred)
+        assert client._resolve_project(None) == 5
+        assert client._resolve_profile(None) == 3
+
+
+class TestDownloadUsesConfiguredIds:
+    """Tests that download() applies the resolved project and profile."""
 
     @pytest.fixture
     def downloads(self, cred_file, monkeypatch, tmp_path):
@@ -298,3 +345,37 @@ class TestDownloadUsesConfiguredProfile:
         monkeypatch.delenv("AIR_PROFILE", raising=False)
         client.download(accession="111", output=tmp_path)
         assert recorded[0]["profile"] == -1
+
+    def test_project_from_environment_is_used(self, downloads, monkeypatch):
+        client, recorded, tmp_path = downloads
+        monkeypatch.setenv("AIR_PROJECT", "5")
+        client.download(accession="111", output=tmp_path)
+        assert recorded[0]["project"] == 5
+
+    def test_explicit_project_overrides_environment(self, downloads, monkeypatch):
+        client, recorded, tmp_path = downloads
+        monkeypatch.setenv("AIR_PROJECT", "5")
+        client.download(accession="111", project=2, output=tmp_path)
+        assert recorded[0]["project"] == 2
+
+    def test_unset_project_stays_minus_one(self, downloads, monkeypatch):
+        client, recorded, tmp_path = downloads
+        monkeypatch.delenv("AIR_PROJECT", raising=False)
+        client.download(accession="111", output=tmp_path)
+        assert recorded[0]["project"] == -1
+
+    def test_both_ids_resolve_together(self, downloads, monkeypatch):
+        client, recorded, tmp_path = downloads
+        monkeypatch.setenv("AIR_PROJECT", "5")
+        monkeypatch.setenv("AIR_PROFILE", "3")
+        client.download(accession="111", output=tmp_path)
+        assert (recorded[0]["project"], recorded[0]["profile"]) == (5, 3)
+
+    def test_search_only_skips_id_resolution(self, cred_file, monkeypatch, tmp_path):
+        # Searching needs neither ID, so a bad value must not block it.
+        monkeypatch.setenv("AIR_PROJECT", "not-an-int")
+        client = AIRClient(cred_path=cred_file)
+        monkeypatch.setattr(client, "search", lambda **kwargs: [{"studyUid": "1"}])
+        assert client.download(accession="111", search_only=True) == [
+            {"studyUid": "1"}
+        ]
