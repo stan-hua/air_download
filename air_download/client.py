@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE_ID = 1
 
+# Retry policy for transient API failures. The portal can rate-limit or
+# briefly refuse a burst of queries, which chunked date searches make more
+# likely, so requests are retried with exponential backoff.
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BACKOFF_FACTOR = 1.0
+DEFAULT_MAX_BACKOFF = 60.0
+RETRY_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
 # Modality codes accepted by the `modality` query parameter of
 # /secure/search/query-data-source, per docs/air_open_api.yaml.
 MODALITIES = frozenset(
@@ -64,6 +72,37 @@ def normalize_modality(modality: str | None) -> str:
     return normalized
 
 
+def backoff_delay(
+    attempt: int,
+    retry_after: str | None = None,
+    backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+    max_backoff: float = DEFAULT_MAX_BACKOFF,
+) -> float:
+    """Compute how long to wait before retrying a request.
+
+    A ``Retry-After`` header wins when the server sends one in seconds,
+    since the server knows its own rate limit better than we do. Otherwise
+    the delay doubles per attempt, capped at ``max_backoff``.
+
+    Args:
+        attempt: Zero-based index of the attempt that just failed.
+        retry_after: Value of the response's ``Retry-After`` header, if any.
+            Only the delay-in-seconds form is honoured; the HTTP-date form
+            falls back to exponential backoff.
+        backoff_factor: Delay in seconds before the first retry.
+        max_backoff: Upper bound on any single delay.
+
+    Returns:
+        Seconds to sleep before the next attempt.
+    """
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), max_backoff)
+        except ValueError:
+            logger.debug("Ignoring non-numeric Retry-After: %r", retry_after)
+    return min(backoff_factor * (2**attempt), max_backoff)
+
+
 class AIRClient:
     """Client for interacting with the AIR (Automated Image Retrieval) API.
 
@@ -80,16 +119,36 @@ class AIRClient:
         1. Credential file (``AIR_USERNAME`` / ``AIR_PASSWORD``)
         2. Environment variables (``AIR_USERNAME`` / ``AIR_PASSWORD``)
 
+    Resolution order for the anonymization profile:
+        1. ``profile`` argument passed to :meth:`download`
+        2. ``AIR_PROFILE`` in the credential file
+        3. ``AIR_PROFILE`` environment variable
+
+    Transient failures (connection errors, timeouts, and the status codes in
+    ``RETRY_STATUS_CODES``) are retried with exponential backoff, honouring a
+    numeric ``Retry-After`` header when the server sends one.
+
     Args:
         url: AIR API base URL. If not provided, resolved from credential
             file or ``AIR_URL`` environment variable.
         cred_path: Path to a dotenv-style credential file containing
-            ``AIR_USERNAME``, ``AIR_PASSWORD``, and optionally ``AIR_URL``.
-            If None, credentials are read from environment variables.
+            ``AIR_USERNAME``, ``AIR_PASSWORD``, and optionally ``AIR_URL``
+            and ``AIR_PROFILE``. If None, values are read from environment
+            variables.
+        max_retries: Number of retries after the initial attempt. Zero
+            disables retrying.
+        backoff_factor: Delay in seconds before the first retry; each
+            subsequent delay doubles.
+        max_backoff: Upper bound on any single retry delay, in seconds.
     """
 
     def __init__(
-        self, url: str | None = None, cred_path: str | Path | None = None
+        self,
+        url: str | None = None,
+        cred_path: str | Path | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+        max_backoff: float = DEFAULT_MAX_BACKOFF,
     ) -> None:
         self._cred_path = Path(cred_path) if cred_path else None
         self._envs = self._load_credential_file()
@@ -97,6 +156,9 @@ class AIRClient:
         self._session = requests.Session()
         self._jwt: str | None = None
         self._projects: list[dict[str, Any]] | None = None
+        self._max_retries = max(0, max_retries)
+        self._backoff_factor = backoff_factor
+        self._max_backoff = max_backoff
 
     def _load_credential_file(self) -> dict[str, str]:
         """Load key-value pairs from the credential file if it exists.
@@ -141,6 +203,38 @@ class AIRClient:
             "  3. AIR_URL environment variable"
         )
 
+    def _resolve_profile(self, profile_arg: int | str | None) -> int:
+        """Resolve the anonymization profile from argument, file, or environment.
+
+        Args:
+            profile_arg: Explicit profile passed by the caller (highest
+                priority). None means "use the configured default".
+
+        Returns:
+            The resolved profile ID, or -1 if none is configured.
+
+        Raises:
+            ValueError: If the resolved value is not an integer.
+        """
+        source = "argument"
+        value = profile_arg
+        if value is None:
+            value = self._envs.get("AIR_PROFILE")
+            source = f"AIR_PROFILE in {self._cred_path}"
+        if value is None:
+            value = os.environ.get("AIR_PROFILE")
+            source = "AIR_PROFILE environment variable"
+        if value is None or value == "":
+            return -1
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Anonymization profile must be an integer, got {value!r} "
+                f"from {source}. Run with -lpf to list valid profile IDs."
+            ) from None
+
     def _get_credentials(self) -> tuple[str, str]:
         """Resolve username and password from credential file or environment.
 
@@ -165,7 +259,13 @@ class AIRClient:
         raise_for_status: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
-        """Make a POST request to the API with error handling.
+        """Make a POST request to the API, retrying transient failures.
+
+        Connection errors, timeouts, and the status codes in
+        ``RETRY_STATUS_CODES`` (rate limiting and server errors) are retried
+        with exponential backoff. Every other response — including ordinary
+        4xx — is returned or raised immediately, since retrying will not
+        change the outcome.
 
         Args:
             endpoint: API endpoint path (appended to the base URL).
@@ -178,13 +278,44 @@ class AIRClient:
             The response object.
 
         Raises:
-            requests.HTTPError: If ``raise_for_status`` is True and the
+            requests.HTTPError: If ``raise_for_status`` is True and the final
                 response status code indicates an error.
+            requests.RequestException: If every attempt failed to connect.
         """
-        response = self._session.post(urljoin(self.url, endpoint), **kwargs)
-        if raise_for_status:
-            response.raise_for_status()
-        return response
+        url = urljoin(self.url, endpoint)
+
+        for attempt in range(self._max_retries + 1):
+            retry_after = None
+            try:
+                response = self._session.post(url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == self._max_retries:
+                    raise
+                reason = f"{type(exc).__name__}"
+            else:
+                is_last = attempt == self._max_retries
+                if response.status_code not in RETRY_STATUS_CODES or is_last:
+                    if raise_for_status:
+                        response.raise_for_status()
+                    return response
+                reason = f"HTTP {response.status_code}"
+                retry_after = response.headers.get("Retry-After")
+
+            delay = backoff_delay(
+                attempt, retry_after, self._backoff_factor, self._max_backoff
+            )
+            logger.warning(
+                "%s from %s (attempt %d of %d); retrying in %.1fs.",
+                reason,
+                endpoint,
+                attempt + 1,
+                self._max_retries + 1,
+                delay,
+            )
+            time.sleep(delay)
+
+        # Unreachable: the loop either returns or raises on its last pass.
+        raise RuntimeError(f"Request to {endpoint} exhausted retries.")
 
     def authenticate(self) -> None:
         """Authenticate with the AIR API and store the JWT token.
@@ -500,7 +631,7 @@ class AIRClient:
         date_end: str | None = None,
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         project: int = -1,
-        profile: int = -1,
+        profile: int | None = None,
         output: Path | None = None,
         exam_modality_inclusion: str | None = None,
         exam_description_inclusion: str | None = None,
@@ -528,7 +659,8 @@ class AIRClient:
                 current time when ``date_start`` is given.
             chunk_days: Maximum span of a single search query, in days.
             project: Project ID.
-            profile: Anonymization profile ID.
+            profile: Anonymization profile ID. When None, falls back to
+                ``AIR_PROFILE`` from the credential file or environment.
             output: Output path (directory or .zip file path).
             exam_modality_inclusion: Comma-separated modality filter patterns.
             exam_description_inclusion: Comma-separated description filter
@@ -547,6 +679,17 @@ class AIRClient:
             List of exam dictionaries if ``search_only`` is True, None
             otherwise.
         """
+        # Resolve before searching so a misconfigured AIR_PROFILE fails now
+        # rather than after a long chunked search.
+        resolved_profile = -1
+        if not search_only:
+            resolved_profile = self._resolve_profile(profile)
+            if profile is None and resolved_profile != -1:
+                logger.info(
+                    "Using anonymization profile %d from configuration.",
+                    resolved_profile,
+                )
+
         exams = self.search(
             accession=accession,
             mrn=mrn,
@@ -593,7 +736,7 @@ class AIRClient:
                 exam_index=i,
                 output=output,
                 project=project,
-                profile=profile,
+                profile=resolved_profile,
                 series_inclusion=series_inclusion,
                 series_exclusion=series_exclusion,
             )

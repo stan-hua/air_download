@@ -58,6 +58,7 @@ Login credentials and the API URL are stored in a dotenv-style plain text file (
 AIR_USERNAME=username
 AIR_PASSWORD=password
 AIR_URL=https://air.<domain>.edu/api/
+AIR_PROFILE=3
 ```
 
 Please ensure this file is reasonably secure:
@@ -77,12 +78,21 @@ The **URL** is resolved from (in priority order):
 1. Credential file (`AIR_USERNAME` / `AIR_PASSWORD`)
 2. Environment variables (`AIR_USERNAME` / `AIR_PASSWORD`)
 
-Setting credentials as environment variables (alternative to the file):
+The **anonymization profile** (`AIR_PROFILE`, an integer) is resolved from:
+
+1. `-pf` / `--profile` CLI flag
+2. `AIR_PROFILE` in the credential file
+3. `AIR_PROFILE` environment variable
+
+Set it once and you can drop `-pf` from every command. `pixi run list-profiles` shows the valid IDs. A non-integer value fails immediately, naming where it came from.
+
+Setting these as environment variables (alternative to the file):
 
 ```bash
 export AIR_USERNAME=username
 export AIR_PASSWORD=password
 export AIR_URL=https://air.<domain>.edu/api/
+export AIR_PROFILE=3
 ```
 
 ## Usage
@@ -111,6 +121,8 @@ air_download     11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3   # standalo
 ```bash
 pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -pj 5 -pf 3
 ```
+
+With `AIR_PROFILE` set in the credential file you can drop `-pf` entirely — see [Credentials and URL configuration](#credentials-and-url-configuration).
 
 **Search/list available exams for a patient or accession (no download):**
 
@@ -179,6 +191,23 @@ pixi run search -m CT -ds 2024-01-01 -de 2024-06-01 --chunk-days 2 -c ~/air_logi
 
 Dates narrow a search but do not constitute one on their own — pair them with an accession, `--mrn`, `--modality`, or `--study-description`.
 
+### Retries
+
+Requests that fail transiently — connection errors, timeouts, rate limiting (`429`), and server errors (`5xx`) — are retried automatically with exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 60s. If the server sends a numeric `Retry-After` header, that wins over the computed delay. Ordinary client errors such as `401` or `404` fail immediately, since retrying cannot help.
+
+This matters most for long chunked date searches, which issue many queries in quick succession and are the likeliest thing to trip a rate limit. Each retry logs a warning naming the reason and the wait.
+
+```bash
+pixi run search -m CT -ds 2024-01-01 --max-retries 10 -c ~/air_login.txt   # more patient
+pixi run search -m CT -ds 2024-01-01 --max-retries 0  -c ~/air_login.txt   # fail fast
+```
+
+From the Python API, tune the policy on the client:
+
+```python
+client = AIRClient(cred_path="...", max_retries=10, backoff_factor=2.0, max_backoff=120)
+```
+
 **Filter by modality, description, or series:**
 
 ```bash
@@ -228,7 +257,7 @@ usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
                     [-xm-exclude EXAM_MODALITY_EXCLUSION]
                     [-xd-exclude EXAM_DESCRIPTION_EXCLUSION]
                     [-s SERIES_INCLUSION] [-s-exclude SERIES_EXCLUSION]
-                    [--search-only] [-v] [-q]
+                    [--search-only] [--max-retries MAX_RETRIES] [-v] [-q]
                     [ACCESSION]
 
 Command line interface to the Automated Image Retrieval (AIR) Portal.
@@ -250,7 +279,9 @@ options:
                         variables. (default: None)
   -o, --output OUTPUT   Output path or directory. (default: None)
   -pf, --profile PROFILE
-                        Anonymization profile ID. (default: -1)
+                        Anonymization profile ID. If omitted, read from
+                        AIR_PROFILE in the credential file or the AIR_PROFILE
+                        environment variable. (default: None)
   -pj, --project PROJECT
                         Project ID. (default: -1)
   -lpj, --list-projects
@@ -313,6 +344,11 @@ options:
                         --mrn. Prints a summary table to stdout. If -o is also
                         provided, writes results to <output>/accessions.csv.
                         (default: False)
+  --max-retries MAX_RETRIES
+                        Number of times to retry a request after a connection
+                        error, timeout, rate limit, or server error. Delays
+                        double each time. Use 0 to fail on the first error.
+                        (default: 5)
   -v, --verbose         Enable verbose (DEBUG level) logging. (default: False)
   -q, --quiet           Suppress all output except errors. (default: False)
 ```
@@ -325,8 +361,11 @@ You can also use `air_download` as a library:
 from pathlib import Path
 from air_download import AIRClient
 
-# URL + credentials resolved from the credential file
+# URL + credentials (+ optional AIR_PROFILE) resolved from the credential file
 client = AIRClient(cred_path="/path/to/air_login.txt")
+
+# Omit `profile` to use AIR_PROFILE from the credential file or environment
+client.download(accession="11111111", project=5, output=Path("output/"))
 
 # Download a single exam by accession
 client.download(accession="11111111", project=5, profile=3, output=Path("output/"))

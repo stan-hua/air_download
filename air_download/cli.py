@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from air_download.client import AIRClient
+from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
 from air_download.utils import DEFAULT_CHUNK_DAYS
 
 logger = logging.getLogger(__name__)
@@ -61,8 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-pf",
         "--profile",
-        help="Anonymization profile ID.",
-        default=-1,
+        type=int,
+        help=(
+            "Anonymization profile ID. If omitted, read from AIR_PROFILE in "
+            "the credential file or the AIR_PROFILE environment variable."
+        ),
+        default=None,
     )
     parser.add_argument(
         "-pj",
@@ -212,6 +216,16 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        help=(
+            "Number of times to retry a request after a connection error, "
+            "timeout, rate limit, or server error. Delays double each time. "
+            "Use 0 to fail on the first error."
+        ),
+        default=DEFAULT_MAX_RETRIES,
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -305,7 +319,9 @@ def main(args: argparse.Namespace) -> None:
     Args:
         args: Parsed command-line arguments.
     """
-    client = AIRClient(url=args.url, cred_path=args.cred_path)
+    client = AIRClient(
+        url=args.url, cred_path=args.cred_path, max_retries=args.max_retries
+    )
 
     if args.list_projects or args.list_profiles:
         if args.list_projects:

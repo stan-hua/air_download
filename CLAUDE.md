@@ -63,7 +63,15 @@ The data source caps results per query, so `search()` never issues one request. 
 
 ### Configuration resolution
 
-URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
+URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Anonymization profile: `-pf`/`profile=` → `AIR_PROFILE` in credential file → `AIR_PROFILE` env var → `-1`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
+
+`-pf` and `download(profile=...)` default to `None`, not `-1` — that is what distinguishes "not supplied, go look at the config" from "explicitly no profile". Don't reintroduce `-1` as the default or the fallback stops working.
+
+### Retries
+
+`_post` is the single choke point for every API call, so the retry loop lives there and nothing else needs to know about it. It retries connection errors, timeouts, and `RETRY_STATUS_CODES` (408/425/429/5xx) with exponential backoff, preferring a numeric `Retry-After` header. Other 4xx are returned or raised immediately.
+
+The loop returns or raises on its final pass, which keeps two existing behaviors intact: `raise_for_status=False` callers (`download/start`) still get the error body back after retries are exhausted, and a persistent 5xx still surfaces as `HTTPError` rather than something new. Tests patch `air_download.client.time.sleep`, so keep calling it through the module rather than importing `sleep` directly.
 
 ## PHI handling
 
