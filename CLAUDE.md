@@ -29,7 +29,7 @@ There is no linter or formatter configured. Existing code in `air_download/` use
 Request flow for every operation is: `cli.py` parses args → constructs `AIRClient` → calls `client.download(...)` (which internally calls `client.search(...)`) → `filters.py` narrows results → `utils.py` builds output paths / writes CSV.
 
 - **`client.py`** — `AIRClient`, the whole API surface. Holds a `requests.Session`, a lazily-acquired JWT (`_auth_header` property authenticates on first use, so callers never call `authenticate()` explicitly), and the project list cached from the login response.
-- **`filters.py`** — `apply_inclusion_filter` / `apply_exclusion_filter`. Both take a comma-separated pattern string and do case-insensitive substring matching with OR logic over one dict field. They are applied to *exams* (on `modality` / `description`) inside `search()`, and to *series* (on `description`) inside `_download_single_exam`. Inclusion runs before exclusion.
+- **`filters.py`** — `apply_inclusion_filter` / `apply_exclusion_filter`. Both take a comma-separated pattern string and do case-insensitive substring matching with OR logic over one dict field. They are applied to *exams* (on `modality` / `description`) inside `search()`, and to *series* (on `description`) inside `_download_single_exam`. Inclusion runs before exclusion. Also holds the `--thinnest-axial` series selection (see below).
 - **`utils.py`** — `build_exam_output_path` (directory vs. `.zip` path disambiguation, index suffix to avoid overwriting) and `write_exams_csv` (appends to `<output>/accessions.csv`, header written only when the file is new).
 - **`cli.py`** — arg parsing, logging setup, table printing. `_configure_logging` deliberately only touches the `air_download` logger so `urllib3`/`requests` stay quiet.
 - **`air_download/air_download.py`** — backward-compat shim re-exporting the public names. Add new code to the focused modules, not here.
@@ -60,6 +60,17 @@ The data source caps results per query, so `search()` never issues one request. 
 - `build_date_ranges` always returns at least one element; all-empty strings means "no date restriction", which is how the un-dated path stays uniform.
 - The response's `truncated` flag is checked per chunk and warns with that chunk's dates, since a 7-day window can still overflow for a busy modality.
 - Naive datetimes get the local offset attached, because every datetime format the spec accepts carries one (only bare `yyyy-MM-dd` may omit it).
+
+### Series selection (`--thinnest-axial`)
+
+What the API gives you per series is only `description`, `imageCount`, `modality`, `seriesNumber`, `seriesUid` — **no slice thickness and no plane**. That asymmetry drives the whole design in `filters.py`:
+
+- Structured reports are selected on `modality == "SR"`, which is exact.
+- Axial detection and thickness are heuristics over `description`, and are therefore configurable and loudly logged. Don't present them as reliable.
+
+Details worth preserving: axial patterns match as **whole words** (`\b…\b`) specifically so `THORAX` and `TRAUMA` don't register as axial — plain substring matching, as used elsewhere in this module, would break that. `parse_slice_thickness` bounds values to 0.1–20mm so a field of view like `FOV 512MM` isn't mistaken for a thickness. When no axial series states a thickness, selection falls back to max `imageCount` and says so at INFO, because that proxy is wrong when candidate series cover different anatomy. Candidates are series whose modality is `CT` or absent; the absent case exists so a data source that omits the field doesn't select nothing.
+
+Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns SR-only (with a warning) rather than everything when no axial matches — silently downloading a whole study would be worse than downloading too little.
 
 ### Configuration resolution
 

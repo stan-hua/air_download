@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
+from air_download.filters import DEFAULT_AXIAL_PATTERNS
 from air_download.utils import DEFAULT_CHUNK_DAYS
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,25 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
+        "--thinnest-axial",
+        action="store_true",
+        help=(
+            "For each exam, keep only the structured report (SR) series plus "
+            "the single axial CT series with the thinnest slices. Thickness "
+            "is read from the series description (e.g. '0.625MM'); if no "
+            "axial series states one, the series with the most images wins. "
+            "Applied after -s and -s-exclude."
+        ),
+    )
+    parser.add_argument(
+        "--axial-patterns",
+        help=(
+            "Comma-separated plane names identifying an axial series, matched "
+            "as whole words in the description (case-insensitive)."
+        ),
+        default=DEFAULT_AXIAL_PATTERNS,
+    )
+    parser.add_argument(
         "--search-only",
         action="store_true",
         help=(
@@ -362,6 +382,8 @@ def main(args: argparse.Namespace) -> None:
         exam_description_exclusion=args.exam_description_exclusion,
         series_inclusion=args.series_inclusion,
         series_exclusion=args.series_exclusion,
+        thinnest_axial=args.thinnest_axial,
+        axial_patterns=args.axial_patterns,
         search_only=args.search_only,
     )
 

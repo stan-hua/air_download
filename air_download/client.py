@@ -12,7 +12,12 @@ import requests
 from dotenv import dotenv_values
 from tqdm import tqdm
 
-from air_download.filters import apply_exclusion_filter, apply_inclusion_filter
+from air_download.filters import (
+    DEFAULT_AXIAL_PATTERNS,
+    apply_exclusion_filter,
+    apply_inclusion_filter,
+    select_sr_and_thinnest_axial,
+)
 from air_download.utils import (
     DEFAULT_CHUNK_DAYS,
     build_date_ranges,
@@ -671,6 +676,8 @@ class AIRClient:
         exam_description_exclusion: str | None = None,
         series_inclusion: str | None = None,
         series_exclusion: str | None = None,
+        thinnest_axial: bool = False,
+        axial_patterns: str = DEFAULT_AXIAL_PATTERNS,
         search_only: bool = False,
     ) -> list[dict[str, Any]] | None:
         """Search for and download DICOM exams from AIR.
@@ -705,6 +712,11 @@ class AIRClient:
                 patterns.
             series_exclusion: Comma-separated series description exclusion
                 patterns.
+            thinnest_axial: If True, reduce each exam to its structured
+                report series plus the single thinnest axial CT series.
+                Applied after ``series_inclusion`` / ``series_exclusion``.
+            axial_patterns: Comma-separated plane names identifying an axial
+                series, matched as whole words in the description.
             search_only: If True, write matching exams to CSV and return
                 without downloading.
 
@@ -777,6 +789,8 @@ class AIRClient:
                 profile=resolved_profile,
                 series_inclusion=series_inclusion,
                 series_exclusion=series_exclusion,
+                thinnest_axial=thinnest_axial,
+                axial_patterns=axial_patterns,
             )
 
         return None
@@ -790,6 +804,8 @@ class AIRClient:
         profile: int,
         series_inclusion: str | None,
         series_exclusion: str | None = None,
+        thinnest_axial: bool = False,
+        axial_patterns: str = DEFAULT_AXIAL_PATTERNS,
     ) -> None:
         """Download a single exam (study) from the API.
 
@@ -801,6 +817,10 @@ class AIRClient:
             profile: Anonymization profile ID.
             series_inclusion: Comma-separated series filter patterns.
             series_exclusion: Comma-separated series exclusion patterns.
+            thinnest_axial: If True, keep only the structured reports and the
+                thinnest axial CT series.
+            axial_patterns: Comma-separated plane names identifying an axial
+                series.
         """
         exam_output_fp = build_exam_output_path(output, study, exam_index)
 
@@ -812,6 +832,8 @@ class AIRClient:
 
         series = apply_inclusion_filter(series, "description", series_inclusion)
         series = apply_exclusion_filter(series, "description", series_exclusion)
+        if thinnest_axial:
+            series = select_sr_and_thinnest_axial(series, axial_patterns)
         if not series:
             logger.warning(
                 "No series found for %s. Check your search parameters.",

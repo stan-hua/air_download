@@ -187,6 +187,7 @@ The data source caps how many exams a single query returns, so a window longer t
 ```bash
 # One year → 53 queries behind the scenes, one merged result set
 pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2024-01-01 -de 2025-01-01 -c ~/air_login.txt
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2022-01-01 -de 2022-01-30 -c ~/air_login.txt
 ```
 
 Chunk boundaries touch, so an exam falling exactly on one can be returned twice; duplicates are removed (by study UID, falling back to accession number plus exam date/time). If a single chunk still comes back truncated, the warning names the window that overflowed — re-run with a smaller `--chunk-days`:
@@ -241,6 +242,40 @@ pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude
 
 The same filter flags apply to `pixi run search` when you want to preview what a download would fetch.
 
+**Keep only the structured report and the thinnest axial CT:**
+
+```bash
+pixi run download -m CT -ds 2024-01-01 -c ~/air_login.txt -o output/ --thinnest-axial
+```
+
+For each exam this keeps every structured report (SR) series plus the single axial CT series with the thinnest slices, dropping scouts, reformats, and the thicker axial reconstructions:
+
+```
+SCOUT                 2 images   CT   dropped
+AXIAL 5MM STD        60 images   CT   dropped
+AXIAL 0.625MM BONE  480 images   CT   kept    <- thinnest
+AXIAL 2.5MM SOFT    120 images   CT   dropped
+COR 3MM MPR          90 images   CT   dropped
+Dose Report           1 image    SR   kept
+```
+
+Structured reports are identified by their series **modality**, which the API reports exactly, so that half is not a guess. The axial selection is a heuristic, because the API exposes no slice thickness or plane field — only `description`, `imageCount`, `modality`, `seriesNumber`, and `seriesUid`. So:
+
+- **Axial** means the description contains `ax`, `axial`, `tra`, `trans`, or `transverse` as a **whole word**, case-insensitive. Whole-word matching is what keeps `THORAX` and `TRAUMA` from counting as axial. Override with `--axial-patterns "ax,axial"` if your site names things differently.
+- **Thinnest** is read from the description when the protocol states it — `AXIAL 0.625MM` → 0.625mm. Values below 0.1mm or above 20mm are ignored as something other than a thickness (a field of view, for instance), and the smallest plausible value wins if several appear.
+- **If no axial series states a thickness**, the one with the most images is chosen instead, on the basis that more images means thinner slices at equal coverage. This is logged when it happens, since it is wrong if the series cover different anatomy.
+- **If nothing matches as axial**, a warning names the patterns tried and only the structured reports are kept.
+
+Run it under `-v` the first few times to see which series each exam actually selected:
+
+```bash
+pixi run download 11111111 -c ~/air_login.txt -o output/ --thinnest-axial -v
+INFO: Thinnest axial series: 'AXIAL 0.625MM BONE' (0.625mm, 480 images).
+INFO: Series selection: from 6 to 2 (1 structured report(s)).
+```
+
+`--thinnest-axial` runs after `-s` and `-s-exclude`, so those can pre-trim the candidates.
+
 **List available projects or anonymization profiles:**
 
 ```bash
@@ -263,6 +298,7 @@ usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
                     [-xm-exclude EXAM_MODALITY_EXCLUSION]
                     [-xd-exclude EXAM_DESCRIPTION_EXCLUSION]
                     [-s SERIES_INCLUSION] [-s-exclude SERIES_EXCLUSION]
+                    [--thinnest-axial] [--axial-patterns AXIAL_PATTERNS]
                     [--search-only] [--max-retries MAX_RETRIES] [-v] [-q]
                     [ACCESSION]
 
@@ -347,6 +383,17 @@ options:
                         Comma-separated list of series exclusion patterns
                         (case-insensitive, OR logic). Excludes matching
                         series. (default: None)
+  --thinnest-axial      For each exam, keep only the structured report (SR)
+                        series plus the single axial CT series with the
+                        thinnest slices. Thickness is read from the series
+                        description (e.g. '0.625MM'); if no axial series
+                        states one, the series with the most images wins.
+                        Applied after -s and -s-exclude. (default: False)
+  --axial-patterns AXIAL_PATTERNS
+                        Comma-separated plane names identifying an axial
+                        series, matched as whole words in the description
+                        (case-insensitive). (default:
+                        ax,axial,tra,trans,transverse)
   --search-only         Only search for exams matching the provided parameters
                         without downloading. Works with both ACCESSION and
                         --mrn. Prints a summary table to stdout. If -o is also
@@ -402,6 +449,13 @@ exams = client.search(
     mrn="12345",
     exam_modality_inclusion="MR",
     exam_modality_exclusion="localizer"
+)
+
+# Keep only the structured report and the thinnest axial CT series
+client.download(
+    accession="11111111",
+    output=Path("output/"),
+    thinnest_axial=True,
 )
 
 # Download with series exclusion
