@@ -187,7 +187,6 @@ The data source caps how many exams a single query returns, so a window longer t
 ```bash
 # One year → 53 queries behind the scenes, one merged result set
 pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2024-01-01 -de 2025-01-01 -c ~/air_login.txt
-pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2022-01-01 -de 2022-01-30 -c ~/air_login.txt
 ```
 
 Chunk boundaries touch, so an exam falling exactly on one can be returned twice; duplicates are removed (by study UID, falling back to accession number plus exam date/time). If a single chunk still comes back truncated, the warning names the window that overflowed — re-run with a smaller `--chunk-days`:
@@ -197,6 +196,73 @@ pixi run search -m CT -ds 2024-01-01 -de 2024-06-01 --chunk-days 2 -c ~/air_logi
 ```
 
 Dates narrow a search but do not constitute one on their own — pair them with an accession, `--mrn`, `--modality`, or `--study-description`.
+
+### Building a cohort, then downloading it
+
+Search first and write the results to a CSV, one directory per cohort:
+
+```bash
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2021-01-01 -de 2023-12-31 -o output-ct_abdomen_pelvis/
+pixi run search -m US -d "US ED BEDSIDE" -ds 2021-01-01 -de 2023-12-31 -o output-us_ed_bedside/
+```
+
+Each writes `<output>/accessions.csv`. Three years is well past the 7-day query cap, so each of these runs as ~157 chunked queries merged into one de-duplicated result set. Review the CSV before committing to a download:
+
+```
+mrn,accession_number,date_time,sex,birthdate,description,image_count
+A1,111,2021-03-02,,,"CT ABDOMEN PELVIS W CONTRAST, AXIAL",480
+A2,222,2022-06-11,,,CT ABDOMEN PELVIS W CONTRAST,300
+```
+
+Note that `--search-only` **appends** to `accessions.csv` if one is already there, so use a fresh directory per cohort or delete the file between runs.
+
+#### Downloading from the CSV
+
+There is no `--accessions-csv` flag — the CLI takes one accession at a time — so loop over the `accession_number` column. Reading it with Python's `csv` module rather than `cut` keeps quoted descriptions from shifting the columns:
+
+```bash
+# CT: keep only the structured report and the thinnest axial series
+pixi run python -c "
+import csv, sys
+with open('output-ct_abdomen_pelvis/accessions.csv') as f:
+    print('\n'.join(r['accession_number'] for r in csv.DictReader(f)))
+" | while read -r acc; do
+    pixi run download "$acc" -o "ct_dicom/" --thinnest-axial
+done
+
+# US: every series in the exam
+pixi run python -c "
+import csv
+with open('output-us_ed_bedside/accessions.csv') as f:
+    print('\n'.join(r['accession_number'] for r in csv.DictReader(f)))
+" | while read -r acc; do
+    pixi run download "$acc" -o "us_dicom/"
+done
+```
+
+Set `AIR_PROJECT` and `AIR_PROFILE` in the credential file first, otherwise every iteration needs `-pj` and `-pf`.
+
+Downloading by accession does not re-apply `-m` or `-d` — it does not need to, since the CSV already holds exactly the exams that matched. Series-level flags still apply per exam, which is why `--thinnest-axial` appears on the CT loop and not the US one.
+
+The same thing from Python, which avoids re-authenticating on every accession and is what I would use for a cohort of any size:
+
+```python
+import csv
+from pathlib import Path
+from air_download import AIRClient
+
+client = AIRClient(cred_path="~/air_login.txt")   # one login for the whole run
+
+with open("output-ct_abdomen_pelvis/accessions.csv") as f:
+    accessions = [row["accession_number"] for row in csv.DictReader(f)]
+
+for accession in accessions:
+    client.download(
+        accession=accession,
+        output=Path("ct_dicom/"),
+        thinnest_axial=True,
+    )
+```
 
 ### Retries
 

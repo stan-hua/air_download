@@ -4,3 +4,10 @@ __pycache__
 
 # pixi environments (pixi.lock is committed)
 .pixi/
+
+# Search results and downloads contain PHI (MRNs, accession numbers,
+# birthdates, DICOM). Never commit them.
+accessions.csv
+*.csv
+output*/
+*.zip
