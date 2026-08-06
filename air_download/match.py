@@ -49,6 +49,9 @@ MATCH_CSV_HEADER = [
     "ct_date_time",
     "ct_description",
     "hours_between",
+    "n_preceding_us",
+    "us_rank_before_ct",
+    "is_closest_us",
 ]
 
 _REQUIRED_COLUMNS = ("mrn", "accession_number", "date_time")
@@ -140,6 +143,13 @@ def match_exams(
     timestamp do not qualify, since neither can be said to have followed the
     other.
 
+    More than one ultrasound can precede the same CT inside the window, which
+    would otherwise show up only as a repeated CT accession number. Each row
+    therefore carries ``n_preceding_us`` (how many ultrasounds qualify for
+    that CT, counted over every ultrasound in the input rather than only the
+    ones this pairing emitted), ``us_rank_before_ct`` (1 for the earliest),
+    and ``is_closest_us`` for the one immediately before the CT.
+
     Parameters
     ----------
     us_exams : list of dict
@@ -177,6 +187,17 @@ def match_exams(
                 if 0 < _hours_between(us["when"], ct["when"]) <= max_hours
             ]
             for ct in qualifying if all_pairs else qualifying[:1]:
+                # Count over every ultrasound for this patient, not just the
+                # ones that were paired, so the ambiguity is reported even
+                # when a preceding ultrasound was paired to a different CT.
+                preceding = [
+                    u
+                    for u in patient_us
+                    if 0 < _hours_between(u["when"], ct["when"]) <= max_hours
+                ]
+                rank = next(
+                    i for i, u in enumerate(preceding) if u is us
+                ) + 1
                 matches.append(
                     {
                         "mrn": mrn,
@@ -189,9 +210,35 @@ def match_exams(
                         "hours_between": round(
                             _hours_between(us["when"], ct["when"]), 3
                         ),
+                        "n_preceding_us": len(preceding),
+                        "us_rank_before_ct": rank,
+                        "is_closest_us": rank == len(preceding),
                     }
                 )
     return matches
+
+
+def count_ambiguous_cts(matches: list[dict[str, Any]]) -> int:
+    """Count CT exams preceded by more than one ultrasound.
+
+    Parameters
+    ----------
+    matches : list of dict
+        Rows from :func:`match_exams`.
+
+    Returns
+    -------
+    int
+        Number of distinct CT exams with more than one qualifying
+        ultrasound before them.
+    """
+    return len(
+        {
+            (m["mrn"], m["ct_accession_number"])
+            for m in matches
+            if m["n_preceding_us"] > 1
+        }
+    )
 
 
 def write_matches_csv(matches: list[dict[str, Any]], output: Path) -> Path:
@@ -266,6 +313,15 @@ def match(
         max_hours,
         written,
     )
+    ambiguous = count_ambiguous_cts(matches)
+    if ambiguous:
+        logger.warning(
+            "%d CT exam(s) had more than one ultrasound before them inside "
+            "the window, so those CTs appear on several rows. Filter on "
+            "is_closest_us to keep one ultrasound per CT, or inspect "
+            "n_preceding_us and us_rank_before_ct to decide case by case.",
+            ambiguous,
+        )
     if not matches:
         logger.warning(
             "No pairs matched. Check that both CSVs cover overlapping dates "

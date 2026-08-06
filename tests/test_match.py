@@ -10,6 +10,7 @@ import pytest
 
 from air_download.match import (
     MATCH_CSV_HEADER,
+    count_ambiguous_cts,
     match_exams,
     read_exams,
     write_matches_csv,
@@ -206,6 +207,133 @@ class TestMatchExams:
     def test_empty_inputs(self):
         assert match_exams([], []) == []
         assert match_exams([exam("A1", "U1", "2021-03-02")], []) == []
+
+
+class TestMultiplePrecedingUltrasounds:
+    """Tests for flagging a CT preceded by more than one ultrasound."""
+
+    @pytest.fixture
+    def two_us_one_ct(self):
+        """Two ultrasounds, then one CT, all inside the window."""
+        us = [
+            exam("A1", "U_EARLY", "2021-03-02T06:00:00-08:00"),
+            exam("A1", "U_LATE", "2021-03-02T09:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        return match_exams(us, ct)
+
+    def test_both_ultrasounds_produce_rows(self, two_us_one_ct):
+        assert [m["us_accession_number"] for m in two_us_one_ct] == [
+            "U_EARLY",
+            "U_LATE",
+        ]
+
+    def test_count_reported_on_every_row(self, two_us_one_ct):
+        assert [m["n_preceding_us"] for m in two_us_one_ct] == [2, 2]
+
+    def test_rank_is_chronological(self, two_us_one_ct):
+        assert [m["us_rank_before_ct"] for m in two_us_one_ct] == [1, 2]
+
+    def test_closest_flag_marks_the_last_ultrasound(self, two_us_one_ct):
+        assert [m["is_closest_us"] for m in two_us_one_ct] == [False, True]
+
+    def test_single_ultrasound_is_closest_and_unambiguous(self):
+        us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00")]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        row = match_exams(us, ct)[0]
+        assert (row["n_preceding_us"], row["us_rank_before_ct"]) == (1, 1)
+        assert row["is_closest_us"] is True
+
+    def test_ultrasound_outside_window_not_counted(self):
+        # U_OLD is 30h before the CT, so it does not make the CT ambiguous.
+        us = [
+            exam("A1", "U_OLD", "2021-03-01T04:00:00-08:00"),
+            exam("A1", "U_NEW", "2021-03-02T09:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        matches = match_exams(us, ct)
+        assert [m["n_preceding_us"] for m in matches] == [1]
+        assert matches[0]["us_accession_number"] == "U_NEW"
+
+    def test_counts_ultrasound_paired_to_a_different_ct(self):
+        # U1 pairs with C_A, U2 with C_B, but both precede C_B in the window,
+        # so C_B's row must still report the ambiguity.
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T12:00:00-08:00"),
+        ]
+        ct = [
+            exam("A1", "C_A", "2021-03-02T10:00:00-08:00"),
+            exam("A1", "C_B", "2021-03-02T20:00:00-08:00"),
+        ]
+        matches = match_exams(us, ct)
+        by_ct = {m["ct_accession_number"]: m for m in matches}
+        assert by_ct["C_A"]["n_preceding_us"] == 1
+        assert by_ct["C_B"]["n_preceding_us"] == 2
+
+    def test_three_ultrasounds_rank_in_order(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T05:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T06:00:00-08:00"),
+            exam("A1", "U3", "2021-03-02T07:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T08:00:00-08:00")]
+        matches = match_exams(us, ct)
+        assert [m["us_rank_before_ct"] for m in matches] == [1, 2, 3]
+        assert [m["is_closest_us"] for m in matches] == [False, False, True]
+
+    def test_identical_timestamps_do_not_confuse_ranking(self):
+        # Two ultrasounds at the same instant: distinct rows, distinct ranks.
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T08:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        matches = match_exams(us, ct)
+        assert sorted(m["us_rank_before_ct"] for m in matches) == [1, 2]
+        assert sum(m["is_closest_us"] for m in matches) == 1
+
+    def test_other_patients_not_counted(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00"),
+            exam("A2", "U2", "2021-03-02T09:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        matches = match_exams(us, ct)
+        assert [m["n_preceding_us"] for m in matches] == [1]
+
+
+class TestCountAmbiguousCts:
+    """Tests for the ambiguity summary."""
+
+    def test_counts_distinct_cts(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T06:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T09:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        assert count_ambiguous_cts(match_exams(us, ct)) == 1
+
+    def test_zero_when_unambiguous(self):
+        us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00")]
+        ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
+        assert count_ambiguous_cts(match_exams(us, ct)) == 0
+
+    def test_same_accession_different_patients_counted_separately(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T06:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T09:00:00-08:00"),
+            exam("A2", "U3", "2021-06-02T06:00:00-08:00"),
+            exam("A2", "U4", "2021-06-02T09:00:00-08:00"),
+        ]
+        ct = [
+            exam("A1", "C1", "2021-03-02T10:00:00-08:00"),
+            exam("A2", "C1", "2021-06-02T10:00:00-08:00"),
+        ]
+        assert count_ambiguous_cts(match_exams(us, ct)) == 2
+
+    def test_empty(self):
+        assert count_ambiguous_cts([]) == 0
 
 
 class TestWriteMatchesCsv:

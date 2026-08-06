@@ -85,6 +85,8 @@ Three rules define a qualifying pair, and each has a test pinning it: same patie
 
 Default keeps the earliest qualifying CT per ultrasound; `--all_pairs` emits all. Output is overwritten rather than appended, deliberately unlike `write_exams_csv`. Log counts only — never MRNs or accession numbers.
 
+Several ultrasounds can precede one CT, so a CT accession can repeat across rows. `n_preceding_us` / `us_rank_before_ct` / `is_closest_us` make that explicit, and a run warns via `count_ambiguous_cts`. The count is taken over **all** of the patient's ultrasounds, not just the paired ones, so a CT stays flagged when a preceding ultrasound was paired elsewhere — it describes the clinical picture, not the pairing strategy. Rank is resolved by identity (`u is us`), not equality, because two ultrasounds can share a timestamp and compare equal as dicts.
+
 ### Configuration resolution
 
 URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Project and profile: `-pj`/`-pf` → `AIR_PROJECT`/`AIR_PROFILE` in credential file → same env vars → `-1`, both via the shared `_resolve_id`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.

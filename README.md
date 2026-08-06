@@ -304,7 +304,45 @@ pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
                --max_hours 48 --all_pairs --output matched_48h.csv
 ```
 
-A patient with several ultrasounds gets one row per ultrasound, so the same CT can appear twice if two ultrasounds preceded it inside the window.
+#### When several ultrasounds precede the same CT
+
+This happens — a repeat scan a few hours before the CT, for instance — and it means one CT legitimately pairs with more than one ultrasound. Every row carries three columns so it is never silent:
+
+| Column | Meaning |
+| --- | --- |
+| `n_preceding_us` | How many ultrasounds qualify for this CT (same patient, inside the window). `1` means unambiguous |
+| `us_rank_before_ct` | This ultrasound's position among them, `1` = earliest |
+| `is_closest_us` | True for the ultrasound immediately before the CT |
+
+```
+mrn  us_accession  us_date_time               ct_accession  hours_between  n_preceding_us  us_rank_before_ct  is_closest_us
+A1   U_EARLY       2021-03-02T06:00:00-08:00  C1            4.0            2               1                  False
+A1   U_LATE        2021-03-02T09:00:00-08:00  C1            1.0            2               2                  True
+A2   U_SOLO        2021-03-05T08:00:00-08:00  C2            4.0            1               1                  True
+```
+
+A run also warns when it happens at all:
+
+```
+WARNING: 1 CT exam(s) had more than one ultrasound before them inside the window,
+so those CTs appear on several rows. Filter on is_closest_us to keep one
+ultrasound per CT, or inspect n_preceding_us and us_rank_before_ct to decide
+case by case.
+```
+
+For one row per CT, keep `is_closest_us`:
+
+```bash
+pixi run python -c "
+import csv
+rows = [r for r in csv.DictReader(open('matched_us_ct.csv')) if r['is_closest_us'] == 'True']
+w = csv.DictWriter(open('matched_closest.csv','w',newline=''), fieldnames=rows[0].keys())
+w.writeheader(); w.writerows(rows)
+print(len(rows), 'rows kept')
+"
+```
+
+`n_preceding_us` counts over **every** ultrasound in the input, not only the ones this run paired. So a CT is still flagged as ambiguous when one of its preceding ultrasounds was paired to a different CT — the count reflects the clinical picture, not the pairing strategy. Ultrasounds outside the window never count toward it.
 
 Timestamps are compared as absolute instants, so mixed UTC offsets and pairs crossing midnight are handled correctly. Rows without an MRN or with an unreadable `date_time` are skipped and counted in a warning; identifiers are never logged. The output file is **overwritten**, not appended to, unlike `accessions.csv`.
 
