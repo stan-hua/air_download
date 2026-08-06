@@ -4,9 +4,21 @@ A command-line and Python interface to the AIR web API. Download radiology studi
 
 ## Installation
 
-### Python package (recommended)
+### With pixi (recommended)
 
-Install directly from the git repository:
+[pixi](https://pixi.sh) is the supported way to work from a clone of this repository. Clone it, then let pixi build the environment from the committed lock file:
+
+```bash
+git clone https://github.com/rauschecker-sugrue-labs/air_download
+cd air_download
+pixi install
+```
+
+That is the only setup step — the package is installed in editable mode, and every command below runs as `pixi run <task>` without activating anything.
+
+### Python package
+
+To install the tool standalone (outside a clone of this repository):
 
 ```bash
 pip install git+https://github.com/rauschecker-sugrue-labs/air_download
@@ -75,38 +87,49 @@ export AIR_URL=https://air.<domain>.edu/api/
 
 ## Usage
 
+Every workflow is available as a pixi task from a clone of the repository, or as the `air_download` command if you installed the package standalone. The two forms are equivalent — pixi appends whatever arguments you pass to the underlying command:
+
+| pixi task | Runs | Purpose |
+| --- | --- | --- |
+| `pixi run download` | `air_download` | Download exams by accession or `--mrn` |
+| `pixi run search` | `air_download --search-only` | List matching exams without downloading |
+| `pixi run list-projects` | `air_download -lpj` | List available project IDs |
+| `pixi run list-profiles` | `air_download -lpf` | List available anonymization profiles |
+| `pixi run test` | `pytest` | Run the test suite |
+
 ### Core workflows
 
 **Download a single exam by accession number** (most common):
 
 ```bash
-air_download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3
+pixi run download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3
+air_download     11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3   # standalone install
 ```
 
 **Download all exams for a patient (MRN):**
 
 ```bash
-air_download --mrn 12345 -c ~/air_login.txt -o output/ -pj 5 -pf 3
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -pj 5 -pf 3
 ```
 
 **Search/list available exams for a patient or accession (no download):**
 
 ```bash
-air_download --mrn 12345 -c ~/air_login.txt --search-only       # prints table to stdout
-air_download 11111111  -c ~/air_login.txt --search-only         # prints table to stdout
+pixi run search --mrn 12345 -c ~/air_login.txt       # prints table to stdout
+pixi run search 11111111    -c ~/air_login.txt       # prints table to stdout
 ```
 
 Add `-o output/` to also save results to `output/accessions.csv`:
 
 ```bash
-air_download --mrn 12345 -c ~/air_login.txt --search-only -o output/
-air_download 11111111  -c ~/air_login.txt --search-only -o output/
+pixi run search --mrn 12345 -c ~/air_login.txt -o output/
+pixi run search 11111111    -c ~/air_login.txt -o output/
 ```
 
 **Filter by modality, description, or series:**
 
 ```bash
-air_download --mrn 12345 -c ~/air_login.txt -o output/ \
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ \
     -xm MR \
     -xd "BRAIN WITH AND WITHOUT CONTRAST" \
     -s "t1,spgr,bravo,mpr"
@@ -116,27 +139,31 @@ air_download --mrn 12345 -c ~/air_login.txt -o output/ \
 
 ```bash
 # Exclude scout and localizer exams
-air_download --mrn 12345 -c ~/air_login.txt -o output/ -xm-exclude "scout,localizer"
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm-exclude "scout,localizer"
 
 # Exclude secondary exams
-air_download --mrn 12345 -c ~/air_login.txt -o output/ -xd-exclude "secondary"
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xd-exclude "secondary"
 
 # Exclude scout series
-air_download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude "scout"
+pixi run download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude "scout"
 
 # Combine inclusion and exclusion (keep MR but exclude localizer)
-air_download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
 ```
+
+The same filter flags apply to `pixi run search` when you want to preview what a download would fetch.
 
 **List available projects or anonymization profiles:**
 
 ```bash
-air_download -c ~/air_login.txt -lpj        # list projects
-air_download -c ~/air_login.txt -lpf        # list profiles
-air_download -c ~/air_login.txt -lpj -lpf   # both
+pixi run list-projects -c ~/air_login.txt          # list projects
+pixi run list-profiles -c ~/air_login.txt          # list profiles
+pixi run download -c ~/air_login.txt -lpj -lpf     # both at once
 ```
 
 ### Full CLI reference
+
+Run `pixi run download -h` (or `air_download -h`) for the current help text:
 
 ```
 $ air_download -h
@@ -261,3 +288,16 @@ If the URL is not in the credential file, pass it explicitly:
 ```python
 client = AIRClient(url="https://air.<domain>.edu/api/", cred_path="/path/to/air_login.txt")
 ```
+
+From a clone, run library code inside the environment with `pixi run python your_script.py`, or open a shell with the environment activated using `pixi shell`.
+
+## Development
+
+```bash
+pixi run test                                        # full test suite
+pixi run pytest tests/test_filters.py -v             # a single test file
+pixi add <package>                                   # add a conda-forge dependency
+pixi add --pypi <package>                            # only if not on conda-forge
+```
+
+Dependencies live in `pyproject.toml` under `[tool.pixi.dependencies]`; `pixi.lock` is committed so environments are reproducible. Keep the bounds there in sync with `[project.dependencies]`, which is what a standalone `pip install` uses.

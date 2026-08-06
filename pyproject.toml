@@ -56,6 +56,12 @@ air_download = { path = ".", editable = true }
 [tool.pixi.environments]
 default = { features = ["dev"], solve-group = "default" }
 
+# Tasks mirror the workflows documented in README.md. pixi appends any
+# trailing arguments, so `pixi run search --mrn 12345 -c ~/air_login.txt`
+# runs `air_download --search-only --mrn 12345 -c ~/air_login.txt`.
 [tool.pixi.tasks]
-test = "pytest"
-cli = "air_download"
+download = { cmd = "air_download", description = "Download exams by accession or --mrn" }
+search = { cmd = "air_download --search-only", description = "List matching exams without downloading" }
+list-projects = { cmd = "air_download -lpj", description = "List available project IDs" }
+list-profiles = { cmd = "air_download -lpf", description = "List available anonymization profiles" }
+test = { cmd = "pytest", description = "Run the test suite" }

@@ -14,9 +14,11 @@ pixi is the only supported package manager — never `pip install` into the envi
 pixi install                   # solve + create the default environment
 pixi run test                  # run all tests
 pixi run pytest tests/test_filters.py::test_name -v   # single test
-pixi run cli -h                # CLI entry point (air_download.cli:cli)
+pixi run download -h           # CLI entry point (air_download.cli:cli)
 pixi add <pkg>                 # conda dep; --pypi only if unavailable on conda-forge
 ```
+
+Tasks mirror the workflows in README.md — `download`, `search`, `list-projects`, `list-profiles`, `test`. They are thin wrappers over `air_download` with a flag pre-applied, and pixi appends trailing arguments, so keep them in sync when CLI flags change.
 
 The package is installed editable into the environment, so source edits need no reinstall. `pixi.lock` is committed; `.pixi/` is not.
 
