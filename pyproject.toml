@@ -28,3 +28,34 @@ air_download = "air_download.cli:cli"
 dev = [
     "pytest>=7.0",
 ]
+
+# ---------------------------------------------------------------------------
+# pixi (the only supported package manager for this project)
+# ---------------------------------------------------------------------------
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
+
+# Runtime dependencies resolved from conda-forge rather than PyPI.
+# Keep the version bounds in sync with [project.dependencies], which remains
+# authoritative for anyone installing the built wheel.
+[tool.pixi.dependencies]
+python = ">=3.10"
+requests = ">=2.28"
+python-dotenv = ">=0.19"
+tqdm = ">=4.60"
+
+# Installs the package itself (and its `air_download` console script) in
+# editable mode, so source edits take effect without a reinstall.
+[tool.pixi.pypi-dependencies]
+air_download = { path = ".", editable = true }
+
+# `dev` is auto-derived from [project.optional-dependencies]; folding it into
+# `default` keeps a single environment holding all necessary requirements.
+[tool.pixi.environments]
+default = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+test = "pytest"
+cli = "air_download"

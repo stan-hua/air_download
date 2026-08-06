@@ -1,3 +1,6 @@
 *.egg-info
 __pycache__
 .env
+
+# pixi environments (pixi.lock is committed)
+.pixi/
