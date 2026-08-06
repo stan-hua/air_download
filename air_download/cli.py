@@ -6,9 +6,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
 from air_download.filters import DEFAULT_AXIAL_PATTERNS
-from air_download.utils import DEFAULT_CHUNK_DAYS
+from air_download.utils import DEFAULT_CHUNK_DAYS, read_accession_pairs, write_exams_csv
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,17 @@ def parse_args() -> argparse.Namespace:
         "-mrn",
         "--mrn",
         help="Patient MRN (Medical Record Number) to search/download exams for.",
+    )
+    parser.add_argument(
+        "--accessions-csv",
+        type=Path,
+        help=(
+            "CSV of exams to download, with 'mrn' and 'accession_number' "
+            "columns (as written by --search-only). Both are used for each "
+            "lookup, since the same accession number can belong to more than "
+            "one patient. Cannot be combined with ACCESSION or --mrn."
+        ),
+        default=None,
     )
     parser.add_argument(
         "-m",
@@ -265,17 +278,23 @@ def parse_args() -> argparse.Namespace:
     arguments = parser.parse_args()
 
     if not (arguments.list_projects or arguments.list_profiles):
+        if arguments.accessions_csv and (arguments.acc or arguments.mrn):
+            parser.error(
+                "--accessions-csv already carries an MRN and accession number "
+                "per row; do not also pass ACCESSION or --mrn."
+            )
         if not any(
             (
                 arguments.acc,
                 arguments.mrn,
                 arguments.modality,
                 arguments.study_description,
+                arguments.accessions_csv,
             )
         ):
             parser.error(
                 "Must specify at least one of: ACCESSION, --mrn, --modality, "
-                "or --study-description."
+                "--study-description, or --accessions-csv."
             )
 
     return arguments
@@ -365,7 +384,88 @@ def main(args: argparse.Namespace) -> None:
                 )
         return
 
-    exams = client.download(
+    if args.accessions_csv:
+        exams = _run_from_csv(client, args)
+    else:
+        exams = _run_single_query(client, args)
+
+    if args.search_only and exams:
+        if args.output is None:
+            _print_exams_table(exams)
+        else:
+            logger.info(
+                "Found %d exam(s). Results written to %s.",
+                len(exams),
+                args.output / "accessions.csv",
+            )
+
+
+def _run_from_csv(
+    client: AIRClient, args: argparse.Namespace
+) -> list[dict[str, Any]] | None:
+    """Search or download every (MRN, accession) pair listed in a CSV.
+
+    Each pair is queried with both values, since an accession number can
+    belong to more than one patient. Under ``--search-only`` the results are
+    merged and written once, rather than appended per row.
+
+    Args:
+        client: The API client.
+        args: Parsed command-line arguments.
+
+    Returns:
+        The merged exams when searching, None when downloading.
+    """
+    pairs = read_accession_pairs(args.accessions_csv)
+    if not pairs:
+        logger.warning("No usable rows in %s.", args.accessions_csv)
+        return [] if args.search_only else None
+
+    merged: list[dict[str, Any]] = []
+    for mrn, accession in tqdm(
+        pairs, desc="Exams from CSV", total=len(pairs), leave=True
+    ):
+        result = client.download(
+            accession=accession,
+            mrn=mrn,
+            chunk_days=args.chunk_days,
+            output=None if args.search_only else args.output,
+            project=args.project,
+            profile=args.profile,
+            exam_modality_inclusion=args.exam_modality_inclusion,
+            exam_description_inclusion=args.exam_description_inclusion,
+            exam_modality_exclusion=args.exam_modality_exclusion,
+            exam_description_exclusion=args.exam_description_exclusion,
+            series_inclusion=args.series_inclusion,
+            series_exclusion=args.series_exclusion,
+            thinnest_axial=args.thinnest_axial,
+            axial_patterns=args.axial_patterns,
+            search_only=args.search_only,
+        )
+        if args.search_only and result:
+            merged.extend(result)
+
+    if not args.search_only:
+        return None
+    if args.output is not None and merged:
+        args.output.mkdir(parents=True, exist_ok=True)
+        write_exams_csv(merged, args.output)
+    return merged
+
+
+def _run_single_query(
+    client: AIRClient, args: argparse.Namespace
+) -> list[dict[str, Any]] | None:
+    """Search or download from the query arguments given on the command line.
+
+    Args:
+        client: The API client.
+        args: Parsed command-line arguments.
+
+    Returns:
+        The matching exams when searching, None when downloading.
+    """
+    return client.download(
         accession=args.acc,
         mrn=args.mrn,
         modality=args.modality,
@@ -386,12 +486,6 @@ def main(args: argparse.Namespace) -> None:
         axial_patterns=args.axial_patterns,
         search_only=args.search_only,
     )
-
-    if args.search_only and exams:
-        if args.output is None:
-            _print_exams_table(exams)
-        else:
-            logger.info("Found %d exam(s). Results written to %s.", len(exams), args.output / "accessions.csv")
 
 
 def cli() -> None:

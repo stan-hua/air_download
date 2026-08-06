@@ -72,6 +72,12 @@ Details worth preserving: axial patterns match as **whole words** (`\b…\b`) sp
 
 Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns SR-only (with a warning) rather than everything when no axial matches — silently downloading a whole study would be worse than downloading too little.
 
+### Bulk input (`--accessions-csv`)
+
+`read_accession_pairs` (in `utils.py`) reads **(mrn, accession_number) pairs, not accessions**. That pairing is a correctness requirement, not convenience: the same accession number can belong to different patients, so querying on the accession alone can return the wrong patient's exam. Never "simplify" this to a list of accessions.
+
+Rows missing either field are skipped with a warning rather than queried on a partial key; exact duplicate pairs are collapsed, which matters because `write_exams_csv` appends and re-running a search doubles every row. `cli.py` splits into `_run_from_csv` (drives its own progress bar, merges results and writes the CSV once under `--search-only`) and `_run_single_query`. The per-exam bar in `download()` is disabled for single-exam results so a 25k-row CSV doesn't leave 25k bars behind.
+
 ### Configuration resolution
 
 URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Project and profile: `-pj`/`-pf` → `AIR_PROJECT`/`AIR_PROFILE` in credential file → same env vars → `-1`, both via the shared `_resolve_id`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
@@ -84,9 +90,19 @@ URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Creden
 
 The loop returns or raises on its final pass, which keeps two existing behaviors intact: `raise_for_status=False` callers (`download/start`) still get the error body back after retries are exhausted, and a persistent 5xx still surfaces as `HTTPError` rather than something new. Tests patch `air_download.client.time.sleep`, so keep calling it through the module rather than importing `sleep` directly.
 
-## PHI handling
+## PHI handling — STRICT
 
-Arguments and outputs are patient identifiers (MRN, accession numbers) and DICOM images. Never write real accession numbers, MRNs, or credential-file contents into the repo, test fixtures, or logs. Tests use synthetic values and `tmp_path`.
+**Never read the contents of any file that may contain PHI.** This is a hard rule, not a default to weigh against convenience.
+
+- **Never** `Read`, `cat`, `head`, `tail`, `grep`, or otherwise open `accessions.csv`, any `*.csv` of search results, downloaded `*.zip`/DICOM, or the credential file. Not to check a format, not to debug a parser, not "just the first line", not even when asked to.
+- Metadata only, when you genuinely need it: `wc -l`, `ls -l`, `test -f`, and column *names* via a header-only check you have written yourself. Never row values.
+- To exercise CSV-reading code, **generate synthetic data** in the scratchpad (`A1,111,...`) and read that. Never a real file from the working tree.
+- `git add -A` has already swept a 25k-row `accessions.csv` into a commit once. Stage explicit paths, or check `git status` before staging, and never assume the ignore rules cover a new output directory.
+- If PHI does reach git: check `origin/main` before anything else, remove from history, then `git reflog expire --expire=now --all && git gc --prune=now` to drop the blob. Report exactly what was and was not pushed.
+
+`.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip`. Keep it that way.
+
+Arguments and outputs are patient identifiers (MRN, accession numbers) and DICOM images. Never write real accession numbers, MRNs, or credential-file contents into the repo, test fixtures, logs, or commit messages. Tests use synthetic values and `tmp_path`.
 
 ## Known drift
 

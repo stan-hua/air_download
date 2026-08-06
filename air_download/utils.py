@@ -226,3 +226,62 @@ def write_exams_csv(
 
     logger.info("Accessions written to file.")
     return output_csv
+
+
+def read_accession_pairs(csv_path: Path) -> list[tuple[str, str]]:
+    """Read (MRN, accession number) pairs from a search-results CSV.
+
+    Both columns are required because an accession number is only unique
+    within a patient: the same number can appear for different patients, so
+    searching on it alone can return another patient's exam. Rows missing
+    either value are skipped, and duplicate pairs are collapsed.
+
+    Args:
+        csv_path: Path to a CSV with ``mrn`` and ``accession_number``
+            columns, such as the ``accessions.csv`` written by
+            ``--search-only``.
+
+    Returns:
+        Unique (MRN, accession number) pairs in file order.
+
+    Raises:
+        ValueError: If the CSV lacks either required column.
+    """
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        missing = [c for c in ("mrn", "accession_number") if c not in fieldnames]
+        if missing:
+            raise ValueError(
+                f"{csv_path} is missing required column(s): "
+                f"{', '.join(missing)}. Found: "
+                f"{', '.join(fieldnames) if fieldnames else '(no header row)'}."
+            )
+
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        incomplete = 0
+        for row in reader:
+            mrn = (row.get("mrn") or "").strip()
+            accession = (row.get("accession_number") or "").strip()
+            if not mrn or not accession:
+                incomplete += 1
+                continue
+            pair = (mrn, accession)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(pair)
+
+    if incomplete:
+        logger.warning(
+            "Skipped %d row(s) in %s missing an MRN or accession number. "
+            "Both are required: an accession number alone can match more "
+            "than one patient.",
+            incomplete,
+            csv_path,
+        )
+    logger.info(
+        "Read %d unique (MRN, accession) pair(s) from %s.", len(pairs), csv_path
+    )
+    return pairs

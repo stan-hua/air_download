@@ -780,6 +780,9 @@ class AIRClient:
             desc="Downloading exams",
             leave=True,
             total=len(exams),
+            # A per-accession caller (e.g. --accessions-csv) drives its own
+            # bar; one nested bar per exam would leave thousands behind.
+            disable=len(exams) <= 1,
         ):
             self._download_single_exam(
                 study=study,

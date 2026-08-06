@@ -216,48 +216,54 @@ A2,222,2022-06-11,,,CT ABDOMEN PELVIS W CONTRAST,300
 
 Note that `--search-only` **appends** to `accessions.csv` if one is already there, so use a fresh directory per cohort or delete the file between runs.
 
+> **These CSVs contain PHI** — MRNs, accession numbers, and birthdates. `.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip` so they cannot be committed by accident. Keep search output out of the repository, and check `git status` before staging.
+
 #### Downloading from the CSV
 
-There is no `--accessions-csv` flag — the CLI takes one accession at a time — so loop over the `accession_number` column. Reading it with Python's `csv` module rather than `cut` keeps quoted descriptions from shifting the columns:
+Feed the CSV straight back in with `--accessions-csv`:
 
 ```bash
 # CT: keep only the structured report and the thinnest axial series
-pixi run python -c "
-import csv, sys
-with open('output-ct_abdomen_pelvis/accessions.csv') as f:
-    print('\n'.join(r['accession_number'] for r in csv.DictReader(f)))
-" | while read -r acc; do
-    pixi run download "$acc" -o "ct_dicom/" --thinnest-axial
-done
+pixi run download --accessions-csv output-ct_abdomen_pelvis/accessions.csv \
+    -o ct_dicom/ --thinnest-axial
 
 # US: every series in the exam
-pixi run python -c "
-import csv
-with open('output-us_ed_bedside/accessions.csv') as f:
-    print('\n'.join(r['accession_number'] for r in csv.DictReader(f)))
-" | while read -r acc; do
-    pixi run download "$acc" -o "us_dicom/"
-done
+pixi run download --accessions-csv output-us_ed_bedside/accessions.csv \
+    -o us_dicom/
 ```
 
-Set `AIR_PROJECT` and `AIR_PROFILE` in the credential file first, otherwise every iteration needs `-pj` and `-pf`.
+**Each row is looked up by MRN *and* accession number together.** The same accession number can belong to more than one patient, so querying on the accession alone can return another patient's exam. Both columns are therefore required, and a row missing either is skipped with a warning rather than guessed at:
 
-Downloading by accession does not re-apply `-m` or `-d` — it does not need to, since the CSV already holds exactly the exams that matched. Series-level flags still apply per exam, which is why `--thinnest-axial` appears on the CT loop and not the US one.
+| CSV rows | Result |
+| --- | --- |
+| `A1,111` and `A2,111` | Two lookups. Same accession, different patients, both fetched |
+| `A1,111` twice | One lookup. Exact duplicates are collapsed |
+| `,111` or `A1,` | Skipped, counted in a warning |
 
-The same thing from Python, which avoids re-authenticating on every accession and is what I would use for a cohort of any size:
+Duplicate collapsing matters because `--search-only` appends: a search re-run into the same directory leaves every row twice, and the download would otherwise fetch each exam twice.
+
+Only `mrn` and `accession_number` are read; column order is irrelevant and extra columns are ignored, so any CSV with those two headers works, not just one this tool wrote. A missing header fails immediately, naming the columns it did find.
+
+`--accessions-csv` cannot be combined with `ACCESSION` or `--mrn`, since the file already supplies both. Search-level flags such as `-m`, `-d`, and the date window are not applied — the CSV already fixes exactly which exams are wanted — while series-level flags still apply to each exam, which is why `--thinnest-axial` is on the CT command and not the US one. Set `AIR_PROJECT` and `AIR_PROFILE` in the credential file so they do not need repeating.
+
+Pair it with `--search-only` to re-check a cohort without downloading; results are merged and written once rather than appended per row:
+
+```bash
+pixi run download --accessions-csv cohort.csv --search-only -o verified/
+```
+
+From Python:
 
 ```python
-import csv
 from pathlib import Path
 from air_download import AIRClient
+from air_download.utils import read_accession_pairs
 
 client = AIRClient(cred_path="~/air_login.txt")   # one login for the whole run
 
-with open("output-ct_abdomen_pelvis/accessions.csv") as f:
-    accessions = [row["accession_number"] for row in csv.DictReader(f)]
-
-for accession in accessions:
+for mrn, accession in read_accession_pairs(Path("output-ct_abdomen_pelvis/accessions.csv")):
     client.download(
+        mrn=mrn,
         accession=accession,
         output=Path("ct_dicom/"),
         thinnest_axial=True,
@@ -357,7 +363,8 @@ Run `pixi run download -h` (or `air_download -h`) for the current help text:
 ```
 $ air_download -h
 usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
-                    [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN] [-m MODALITY]
+                    [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN]
+                    [--accessions-csv ACCESSIONS_CSV] [-m MODALITY]
                     [-d STUDY_DESCRIPTION] [-ds DATE_START] [-de DATE_END]
                     [--chunk-days CHUNK_DAYS] [-xm EXAM_MODALITY_INCLUSION]
                     [-xd EXAM_DESCRIPTION_INCLUSION]
@@ -401,6 +408,13 @@ options:
                         False)
   -mrn, --mrn MRN       Patient MRN (Medical Record Number) to search/download
                         exams for. (default: None)
+  --accessions-csv ACCESSIONS_CSV
+                        CSV of exams to download, with 'mrn' and
+                        'accession_number' columns (as written by --search-
+                        only). Both are used for each lookup, since the same
+                        accession number can belong to more than one patient.
+                        Cannot be combined with ACCESSION or --mrn. (default:
+                        None)
   -m, --modality MODALITY
                         Modality to query the server for across all patients
                         (e.g. 'CT', 'US', 'MR'). Unlike -xm, this is sent to
