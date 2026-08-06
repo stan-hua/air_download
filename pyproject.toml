@@ -16,6 +16,7 @@ dependencies = [
     "requests>=2.28",
     "python-dotenv>=0.19",
     "tqdm>=4.60",
+    "fire>=0.5",
 ]
 
 [project.urls]
@@ -23,6 +24,7 @@ Repository = "https://github.com/rauschecker-sugrue-labs/air_download"
 
 [project.scripts]
 air_download = "air_download.cli:cli"
+air_match = "air_download.match:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -45,6 +47,7 @@ python = ">=3.10"
 requests = ">=2.28"
 python-dotenv = ">=0.19"
 tqdm = ">=4.60"
+fire = ">=0.5"
 
 # Installs the package itself (and its `air_download` console script) in
 # editable mode, so source edits take effect without a reinstall.
@@ -64,4 +67,5 @@ download = { cmd = "air_download", description = "Download exams by accession or
 search = { cmd = "air_download --search-only", description = "List matching exams without downloading" }
 list-projects = { cmd = "air_download -lpj", description = "List available project IDs" }
 list-profiles = { cmd = "air_download -lpf", description = "List available anonymization profiles" }
+match = { cmd = "air_match", description = "Match ED ultrasound exams to the CTs that followed" }
 test = { cmd = "pytest", description = "Run the test suite" }

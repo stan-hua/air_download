@@ -107,6 +107,7 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run search` | `air_download --search-only` | List matching exams without downloading |
 | `pixi run list-projects` | `air_download -lpj` | List available project IDs |
 | `pixi run list-profiles` | `air_download -lpf` | List available anonymization profiles |
+| `pixi run match` | `air_match` | Match ultrasound exams to the CTs that followed |
 | `pixi run test` | `pytest` | Run the test suite |
 
 ### Core workflows
@@ -268,6 +269,56 @@ for mrn, accession in read_accession_pairs(Path("output-ct_abdomen_pelvis/access
         output=Path("ct_dicom/"),
         thinnest_axial=True,
     )
+```
+
+### Matching ultrasounds to the CTs that followed
+
+`pixi run match` pairs two search-result CSVs into a cohort of patients who had an ED ultrasound and then a CT:
+
+```bash
+pixi run match --us_csv output-us_ed_bedside/accessions.csv \
+               --ct_csv output-ct_abdomen_pelvis/accessions.csv \
+               --output matched_us_ct.csv
+```
+
+A pair qualifies when all three hold:
+
+1. **Same patient** — matched on `mrn`, never on accession number, which repeats across patients.
+2. **CT strictly after the ultrasound** — a CT before it is excluded, and so is one sharing its timestamp, since neither followed the other.
+3. **Within 24 hours** — inclusive at exactly 24h; `--max_hours` changes the window.
+
+Output is one row per matched ultrasound:
+
+```
+mrn,us_accession_number,us_date_time,us_description,ct_accession_number,ct_date_time,ct_description,hours_between
+A1,U1,2021-03-02T08:00:00-08:00,US ED BEDSIDE,C1,2021-03-02T14:00:00-08:00,CT ABDOMEN PELVIS W CONTRAST,6.0
+A4,U4,2021-04-01T22:00:00-07:00,US ED BEDSIDE,C4,2021-04-02T03:00:00-07:00,CT ABDOMEN PELVIS W CONTRAST,5.0
+```
+
+`hours_between` is there so you can sanity-check the window and tighten it afterwards without re-running.
+
+When a patient has **several qualifying CTs**, the default keeps the **earliest** one — the CT that actually followed the ultrasound. `--all_pairs` emits every qualifying CT instead:
+
+```bash
+pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
+               --max_hours 48 --all_pairs --output matched_48h.csv
+```
+
+A patient with several ultrasounds gets one row per ultrasound, so the same CT can appear twice if two ultrasounds preceded it inside the window.
+
+Timestamps are compared as absolute instants, so mixed UTC offsets and pairs crossing midnight are handled correctly. Rows without an MRN or with an unreadable `date_time` are skipped and counted in a warning; identifiers are never logged. The output file is **overwritten**, not appended to, unlike `accessions.csv`.
+
+Both inputs need `mrn`, `accession_number`, and `date_time` columns — any CSV with those works, not just one this tool wrote. Feed the result back in for downloading by splitting out whichever accession column you want:
+
+```bash
+pixi run python -c "
+import csv
+rows = list(csv.DictReader(open('matched_us_ct.csv')))
+with open('matched_ct_only.csv','w',newline='') as f:
+    w = csv.writer(f); w.writerow(['mrn','accession_number'])
+    w.writerows([[r['mrn'], r['ct_accession_number']] for r in rows])
+"
+pixi run download --accessions-csv matched_ct_only.csv -o matched_ct_dicom/ --thinnest-axial
 ```
 
 ### Retries
