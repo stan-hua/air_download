@@ -155,6 +155,30 @@ pixi run search -m CT -xd "abdomen pelvis" -c ~/air_login.txt
 
 Both flags work with `pixi run download` too, but a modality-only download pulls every matching exam across patients — preview it with `pixi run search` first.
 
+**Restrict the search to a date window:**
+
+```bash
+pixi run search -m CT -ds 2024-01-15 -de 2024-01-31 -c ~/air_login.txt
+pixi run search -m US -d "US ED BEDSIDE" -ds 2024-01-01 -c ~/air_login.txt   # through now
+```
+
+`--date-start` (`-ds`) and `--date-end` (`-de`) take any ISO 8601 date or datetime — `2024-01-15` or `2024-01-15T13:30:00-08:00`. A date without an offset is interpreted in your local timezone. **If `--date-end` is omitted it defaults to the current date and time.**
+
+The data source caps how many exams a single query returns, so a window longer than 7 days is automatically searched in consecutive 7-day chunks and the results merged:
+
+```bash
+# One year → 53 queries behind the scenes, one merged result set
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2024-01-01 -de 2025-01-01 -c ~/air_login.txt
+```
+
+Chunk boundaries touch, so an exam falling exactly on one can be returned twice; duplicates are removed (by study UID, falling back to accession number plus exam date/time). If a single chunk still comes back truncated, the warning names the window that overflowed — re-run with a smaller `--chunk-days`:
+
+```bash
+pixi run search -m CT -ds 2024-01-01 -de 2024-06-01 --chunk-days 2 -c ~/air_login.txt
+```
+
+Dates narrow a search but do not constitute one on their own — pair them with an accession, `--mrn`, `--modality`, or `--study-description`.
+
 **Filter by modality, description, or series:**
 
 ```bash
@@ -198,7 +222,8 @@ Run `pixi run download -h` (or `air_download -h`) for the current help text:
 $ air_download -h
 usage: air_download [-h] [--url URL] [-c CRED_PATH] [-o OUTPUT] [-pf PROFILE]
                     [-pj PROJECT] [-lpj] [-lpf] [-mrn MRN] [-m MODALITY]
-                    [-d STUDY_DESCRIPTION] [-xm EXAM_MODALITY_INCLUSION]
+                    [-d STUDY_DESCRIPTION] [-ds DATE_START] [-de DATE_END]
+                    [--chunk-days CHUNK_DAYS] [-xm EXAM_MODALITY_INCLUSION]
                     [-xd EXAM_DESCRIPTION_INCLUSION]
                     [-xm-exclude EXAM_MODALITY_EXCLUSION]
                     [-xd-exclude EXAM_DESCRIPTION_EXCLUSION]
@@ -246,6 +271,19 @@ options:
                         Matching is performed by the data source; use -xd for
                         guaranteed case-insensitive substring matching on the
                         returned exams. (default: None)
+  -ds, --date-start DATE_START
+                        Start of the date window to search, ISO 8601 (e.g.
+                        '2024-01-15' or '2024-01-15T13:30:00-08:00').
+                        (default: None)
+  -de, --date-end DATE_END
+                        End of the date window to search, ISO 8601. Defaults
+                        to the current date and time when --date-start is
+                        given. (default: None)
+  --chunk-days CHUNK_DAYS
+                        The data source caps how many exams one query returns,
+                        so date windows longer than this are searched in
+                        consecutive chunks and the results merged. Lower it if
+                        results still come back truncated. (default: 7)
   -xm, --exam_modality_inclusion EXAM_MODALITY_INCLUSION
                         Comma-separated list of exam modality inclusion
                         patterns (case-insensitive, OR logic). Example:
@@ -306,6 +344,11 @@ exams = client.search(accession="11111111")
 exams = client.search(modality="CT", study_description="CT ABDOMEN PELVIS W CONTRAST")
 exams = client.search(modality="US", study_description="US ED BEDSIDE")
 exams = client.search(modality="CT")   # every CT the data source returns
+
+# Restrict to a date window; windows longer than chunk_days are searched
+# in consecutive chunks and merged. date_end defaults to now.
+exams = client.search(modality="CT", date_start="2024-01-01", date_end="2024-06-01")
+exams = client.search(modality="CT", date_start="2024-01-01", chunk_days=2)
 
 # Use exclusion filters
 exams = client.search(

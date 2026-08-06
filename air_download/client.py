@@ -13,7 +13,13 @@ from dotenv import dotenv_values
 from tqdm import tqdm
 
 from air_download.filters import apply_exclusion_filter, apply_inclusion_filter
-from air_download.utils import build_exam_output_path, write_exams_csv
+from air_download.utils import (
+    DEFAULT_CHUNK_DAYS,
+    build_date_ranges,
+    build_exam_output_path,
+    exam_key,
+    write_exams_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +258,9 @@ class AIRClient:
         mrn: str | None = None,
         modality: str | None = None,
         study_description: str | None = None,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        chunk_days: int = DEFAULT_CHUNK_DAYS,
         exam_modality_inclusion: str | None = None,
         exam_description_inclusion: str | None = None,
         exam_modality_exclusion: str | None = None,
@@ -267,6 +276,10 @@ class AIRClient:
         ``*_exclusion`` arguments are applied client-side to whatever the
         server returns.
 
+        The data source caps how many exams one query may return, so a date
+        window longer than ``chunk_days`` is issued as several consecutive
+        queries and the results are merged and de-duplicated.
+
         Args:
             accession: Accession number to search for.
             mrn: Patient MRN to search for.
@@ -277,6 +290,11 @@ class AIRClient:
                 are decided by the data source; use
                 ``exam_description_inclusion`` for guaranteed substring
                 matching.
+            date_start: Start of the date window, ISO 8601 (e.g.
+                ``2024-01-15``). Without it the search is not bounded below.
+            date_end: End of the date window, ISO 8601. Defaults to the
+                current time when ``date_start`` is given.
+            chunk_days: Maximum span of a single query, in days.
             exam_modality_inclusion: Comma-separated modality filter patterns.
             exam_description_inclusion: Comma-separated description filter
                 patterns.
@@ -289,8 +307,9 @@ class AIRClient:
             List of matching exam dictionaries.
 
         Raises:
-            ValueError: If no search criterion is provided, or if ``modality``
-                is not a code the API accepts.
+            ValueError: If no search criterion is provided, if ``modality``
+                is not a code the API accepts, or if the date window is
+                unparseable or ends before it starts.
         """
         if not any((accession, mrn, modality, study_description)):
             raise ValueError(
@@ -304,31 +323,12 @@ class AIRClient:
             "accNum": accession or "",
             "studyUid": "",
             "studyDescription": study_description or "",
-            "dateRange": {"start": "", "end": "", "label": ""},
             "modality": normalize_modality(modality),
             "sourceId": source_id,
         }
-        response = self._post(
-            "secure/search/query-data-source",
-            headers=self._auth_header,
-            json=search_params,
-        ).json()
+        date_ranges = build_date_ranges(date_start, date_end, chunk_days)
 
-        if response.get("successful") is False:
-            raise RuntimeError(
-                "Search failed. Server message: "
-                f"{response.get('message', '(none)')}"
-            )
-
-        exams = response.get("exams") or []
-        logger.debug("Search returned %d exam(s).", len(exams))
-        if response.get("truncated"):
-            logger.warning(
-                "The data source truncated these results at %d exam(s). "
-                "Narrow the search (e.g. add --study-description or a more "
-                "specific --modality) to see the rest.",
-                len(exams),
-            )
+        exams = self._search_date_ranges(search_params, date_ranges, chunk_days)
         # Remove patientName from exams
         for exam in exams:
             exam.pop("patientName", None)
@@ -347,6 +347,97 @@ class AIRClient:
                 len(exams),
             )
 
+        return exams
+
+    def _query_data_source(
+        self, search_params: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Issue a single query against the data source.
+
+        Args:
+            search_params: The complete query payload, including ``dateRange``.
+
+        Returns:
+            Tuple of (matching exams, whether the data source truncated them).
+
+        Raises:
+            RuntimeError: If the data source reports the query as failed.
+        """
+        response = self._post(
+            "secure/search/query-data-source",
+            headers=self._auth_header,
+            json=search_params,
+        ).json()
+
+        if response.get("successful") is False:
+            raise RuntimeError(
+                "Search failed. Server message: "
+                f"{response.get('message', '(none)')}"
+            )
+
+        return (response.get("exams") or []), bool(response.get("truncated"))
+
+    def _search_date_ranges(
+        self,
+        search_params: dict[str, Any],
+        date_ranges: list[dict[str, str]],
+        chunk_days: int,
+    ) -> list[dict[str, Any]]:
+        """Query once per date range and merge the results.
+
+        Chunk boundaries touch, so the same exam can be returned by two
+        adjacent queries; duplicates are dropped, keeping first-seen order.
+
+        Args:
+            search_params: Query payload without ``dateRange``.
+            date_ranges: The ``dateRange`` payloads to query, in order.
+            chunk_days: Chunk length, used only for the truncation warning.
+
+        Returns:
+            The merged, de-duplicated exams.
+        """
+        if len(date_ranges) > 1:
+            logger.info(
+                "Date window exceeds %d day(s); searching in %d chunk(s).",
+                chunk_days,
+                len(date_ranges),
+            )
+
+        exams: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        chunks = (
+            tqdm(date_ranges, desc="Searching date ranges", leave=False)
+            if len(date_ranges) > 1
+            else date_ranges
+        )
+
+        for date_range in chunks:
+            chunk_exams, truncated = self._query_data_source(
+                {**search_params, "dateRange": date_range}
+            )
+            if truncated:
+                logger.warning(
+                    "The data source truncated results for %s to %s at %d "
+                    "exam(s). Re-run with a smaller chunk (e.g. "
+                    "--chunk-days %d) to see the rest.",
+                    date_range["start"] or "the earliest exam",
+                    date_range["end"] or "the latest exam",
+                    len(chunk_exams),
+                    max(1, chunk_days // 2),
+                )
+            for exam in chunk_exams:
+                key = exam_key(exam)
+                if key in seen:
+                    continue
+                seen.add(key)
+                exams.append(exam)
+
+        logger.debug(
+            "Search returned %d exam(s) across %d quer%s.",
+            len(exams),
+            len(date_ranges),
+            "y" if len(date_ranges) == 1 else "ies",
+        )
         return exams
 
     def _check_download_started(
@@ -405,6 +496,9 @@ class AIRClient:
         mrn: str | None = None,
         modality: str | None = None,
         study_description: str | None = None,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        chunk_days: int = DEFAULT_CHUNK_DAYS,
         project: int = -1,
         profile: int = -1,
         output: Path | None = None,
@@ -429,6 +523,10 @@ class AIRClient:
             modality: Modality code to query the server for (e.g. ``CT``).
             study_description: Study description to query the server for
                 (e.g. ``CT ABDOMEN PELVIS W CONTRAST``).
+            date_start: Start of the date window, ISO 8601.
+            date_end: End of the date window, ISO 8601. Defaults to the
+                current time when ``date_start`` is given.
+            chunk_days: Maximum span of a single search query, in days.
             project: Project ID.
             profile: Anonymization profile ID.
             output: Output path (directory or .zip file path).
@@ -454,6 +552,9 @@ class AIRClient:
             mrn=mrn,
             modality=modality,
             study_description=study_description,
+            date_start=date_start,
+            date_end=date_end,
+            chunk_days=chunk_days,
             exam_modality_inclusion=exam_modality_inclusion,
             exam_description_inclusion=exam_description_inclusion,
             exam_modality_exclusion=exam_modality_exclusion,

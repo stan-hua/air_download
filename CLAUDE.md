@@ -49,7 +49,17 @@ Keep these distinct — conflating them is the easiest mistake to make in this c
 - **Server-side query parameters** (`modality`, `study_description`, plus `accession`/`mrn`) go into the `query-data-source` payload and decide what the data source returns at all. `modality` must be a single code from `MODALITIES` in `client.py` (mirrored from the spec's enum) and is validated by `normalize_modality` before any network call. A search needs at least one of these four.
 - **Client-side filters** (`*_inclusion` / `*_exclusion`, CLI `-xm`/`-xd`/`-s`) run in `filters.py` after results return and are pure substring matching.
 
-The spec marks `name`, `mrn`, `accNum`, `studyUid`, `studyDescription`, `modality`, `sourceId`, and `dateRange` as required in the query payload — send all of them, empty-string the unused ones. The response's `truncated` flag matters for broad cross-patient searches and is surfaced as a warning; `dateRange` is still hardcoded empty and is the natural next lever for bounding those searches.
+The spec marks `name`, `mrn`, `accNum`, `studyUid`, `studyDescription`, `modality`, `sourceId`, and `dateRange` as required in the query payload — send all of them, empty-string the unused ones.
+
+### Date chunking
+
+The data source caps results per query, so `search()` never issues one request. `build_date_ranges` (in `utils.py`, pure and injectable via `now=`) turns the requested window into a list of `dateRange` payloads of at most `chunk_days` (default 7); `_search_date_ranges` queries each and merges. Consequences to preserve when touching this path:
+
+- Chunk boundaries **touch** (`chunk[n].end == chunk[n+1].start`), so an exam on a boundary comes back twice. De-duplication via `exam_key` (study UID, falling back to accession + dateTime) is what makes that safe — don't drop it.
+- Client-side filters run **once after** merging, not per chunk.
+- `build_date_ranges` always returns at least one element; all-empty strings means "no date restriction", which is how the un-dated path stays uniform.
+- The response's `truncated` flag is checked per chunk and warns with that chunk's dates, since a 7-day window can still overflow for a busy modality.
+- Naive datetimes get the local offset attached, because every datetime format the spec accepts carries one (only bare `yyyy-MM-dd` may omit it).
 
 ### Configuration resolution
 

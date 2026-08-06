@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from air_download.client import AIRClient
+from air_download.utils import DEFAULT_CHUNK_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,35 @@ def parse_args() -> argparse.Namespace:
             "substring matching on the returned exams."
         ),
         default=None,
+    )
+    parser.add_argument(
+        "-ds",
+        "--date-start",
+        help=(
+            "Start of the date window to search, ISO 8601 (e.g. '2024-01-15' "
+            "or '2024-01-15T13:30:00-08:00')."
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "-de",
+        "--date-end",
+        help=(
+            "End of the date window to search, ISO 8601. Defaults to the "
+            "current date and time when --date-start is given."
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "--chunk-days",
+        type=int,
+        help=(
+            "The data source caps how many exams one query returns, so date "
+            "windows longer than this are searched in consecutive chunks and "
+            "the results merged. Lower it if results still come back "
+            "truncated."
+        ),
+        default=DEFAULT_CHUNK_DAYS,
     )
     parser.add_argument(
         "-xm",
@@ -300,6 +330,9 @@ def main(args: argparse.Namespace) -> None:
         mrn=args.mrn,
         modality=args.modality,
         study_description=args.study_description,
+        date_start=args.date_start,
+        date_end=args.date_end,
+        chunk_days=args.chunk_days,
         output=args.output,
         project=args.project,
         profile=args.profile,

@@ -19,14 +19,17 @@ def client(tmp_path):
 
 @pytest.fixture
 def captured_query(client, monkeypatch):
-    """Capture the search payload and return a canned response.
+    """Capture search payloads and return canned responses.
 
-    The returned dict is mutated in place: ``payload`` holds the JSON body of
-    the last search request, and ``response`` can be reassigned by a test to
-    control what the fake server returns.
+    The returned dict is mutated in place. ``payload`` holds the JSON body of
+    the most recent request and ``payloads`` every body in order, so chunked
+    searches can be inspected. ``response`` may be reassigned to a dict, or
+    to a callable taking the payload and returning the body, to vary what the
+    fake server returns per chunk.
     """
     state = {
         "payload": None,
+        "payloads": [],
         "response": {"successful": True, "truncated": False, "exams": []},
     }
 
@@ -38,8 +41,11 @@ def captured_query(client, monkeypatch):
             return self._body
 
     def fake_post(endpoint, raise_for_status=True, **kwargs):
-        state["payload"] = kwargs.get("json")
-        return FakeResponse(state["response"])
+        payload = kwargs.get("json")
+        state["payload"] = payload
+        state["payloads"].append(payload)
+        response = state["response"]
+        return FakeResponse(response(payload) if callable(response) else response)
 
     monkeypatch.setattr(client, "_post", fake_post)
     return state
@@ -176,6 +182,150 @@ class TestSearchResponseHandling:
         with caplog.at_level("WARNING"):
             client.search(modality="CT")
         assert "truncated" in caplog.text.lower()
+
+class TestChunkedSearch:
+    """Tests for splitting a long date window across several queries."""
+
+    def test_short_window_is_one_query(self, client, captured_query):
+        client.search(modality="CT", date_start="2024-01-01", date_end="2024-01-05")
+        assert len(captured_query["payloads"]) == 1
+
+    def test_long_window_is_chunked(self, client, captured_query):
+        client.search(modality="CT", date_start="2024-01-01", date_end="2024-01-29")
+        # 28 days at 7 days per chunk.
+        assert len(captured_query["payloads"]) == 4
+
+    def test_chunks_are_contiguous_and_cover_the_window(self, client, captured_query):
+        client.search(modality="CT", date_start="2024-01-01", date_end="2024-02-01")
+        ranges = [p["dateRange"] for p in captured_query["payloads"]]
+        assert ranges[0]["start"].startswith("2024-01-01")
+        assert ranges[-1]["end"].startswith("2024-02-01")
+        for earlier, later in zip(ranges, ranges[1:]):
+            assert earlier["end"] == later["start"]
+
+    def test_chunk_days_is_configurable(self, client, captured_query):
+        client.search(
+            modality="CT",
+            date_start="2024-01-01",
+            date_end="2024-01-11",
+            chunk_days=2,
+        )
+        assert len(captured_query["payloads"]) == 5
+
+    def test_search_criteria_repeat_in_every_chunk(self, client, captured_query):
+        client.search(
+            modality="CT",
+            study_description="CT ABDOMEN PELVIS",
+            date_start="2024-01-01",
+            date_end="2024-01-29",
+        )
+        for payload in captured_query["payloads"]:
+            assert payload["modality"] == "CT"
+            assert payload["studyDescription"] == "CT ABDOMEN PELVIS"
+
+    def test_results_are_merged_across_chunks(self, client, captured_query):
+        counter = {"n": 0}
+
+        def respond(payload):
+            counter["n"] += 1
+            return {
+                "successful": True,
+                "exams": [{"studyUid": f"uid-{counter['n']}", "modality": "CT"}],
+            }
+
+        captured_query["response"] = respond
+        exams = client.search(
+            modality="CT", date_start="2024-01-01", date_end="2024-01-29"
+        )
+        assert len(exams) == 4
+        assert {e["studyUid"] for e in exams} == {"uid-1", "uid-2", "uid-3", "uid-4"}
+
+    def test_duplicates_across_chunks_are_dropped(self, client, captured_query):
+        # An exam sitting on a chunk boundary comes back from both queries.
+        captured_query["response"] = {
+            "successful": True,
+            "exams": [{"studyUid": "same-uid", "modality": "CT"}],
+        }
+        exams = client.search(
+            modality="CT", date_start="2024-01-01", date_end="2024-01-29"
+        )
+        assert len(exams) == 1
+
+    def test_deduplicates_without_study_uid(self, client, captured_query):
+        captured_query["response"] = {
+            "successful": True,
+            "exams": [
+                {"accessionNumber": "111", "dateTime": "2024-01-02T00:00:00-08:00"}
+            ],
+        }
+        exams = client.search(
+            modality="CT", date_start="2024-01-01", date_end="2024-01-29"
+        )
+        assert len(exams) == 1
+
+    def test_truncated_chunk_warns_with_its_dates(self, client, captured_query, caplog):
+        captured_query["response"] = {
+            "successful": True,
+            "truncated": True,
+            "exams": [{"studyUid": "uid-1"}],
+        }
+        with caplog.at_level("WARNING"):
+            client.search(modality="CT", date_start="2024-01-01", date_end="2024-01-08")
+        assert "truncated" in caplog.text.lower()
+        assert "2024-01-01" in caplog.text
+
+    def test_filters_apply_once_after_merging(self, client, captured_query):
+        counter = {"n": 0}
+
+        def respond(payload):
+            counter["n"] += 1
+            return {
+                "successful": True,
+                "exams": [
+                    {
+                        "studyUid": f"uid-{counter['n']}",
+                        "description": "CT ABDOMEN PELVIS W CONTRAST",
+                    },
+                    {
+                        "studyUid": f"uid-{counter['n']}-b",
+                        "description": "CT HEAD WO CONTRAST",
+                    },
+                ],
+            }
+
+        captured_query["response"] = respond
+        exams = client.search(
+            modality="CT",
+            date_start="2024-01-01",
+            date_end="2024-01-29",
+            exam_description_inclusion="abdomen pelvis",
+        )
+        assert len(exams) == 4
+        assert all("ABDOMEN PELVIS" in e["description"] for e in exams)
+
+    def test_no_dates_sends_empty_range(self, client, captured_query):
+        client.search(modality="CT")
+        assert captured_query["payload"]["dateRange"] == {
+            "start": "",
+            "end": "",
+            "label": "",
+        }
+
+    def test_end_before_start_raises(self, client, captured_query):
+        with pytest.raises(ValueError, match="ends before it starts"):
+            client.search(
+                modality="CT", date_start="2024-02-01", date_end="2024-01-01"
+            )
+        assert captured_query["payloads"] == []
+
+    def test_unparseable_date_raises(self, client, captured_query):
+        with pytest.raises(ValueError, match="Could not parse date"):
+            client.search(modality="CT", date_start="last tuesday")
+        assert captured_query["payloads"] == []
+
+
+class TestSearchResponseHandlingContinued:
+    """Remaining response-handling tests."""
 
     def test_client_side_filters_still_apply(self, client, captured_query):
         captured_query["response"] = {
