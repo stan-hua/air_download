@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,12 @@ from tqdm import tqdm
 
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
 from air_download.filters import DEFAULT_AXIAL_PATTERNS
-from air_download.utils import DEFAULT_CHUNK_DAYS, read_accession_pairs, write_exams_csv
+from air_download.utils import (
+    DEFAULT_CHUNK_DAYS,
+    configure_logging,
+    read_accession_pairs,
+    write_exams_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,26 +338,11 @@ def _print_exams_table(exams: list[dict[str, Any]]) -> None:
 def _configure_logging(verbose: bool = False, quiet: bool = False) -> None:
     """Configure logging based on verbosity flags.
 
-    Only the ``air_download`` logger is affected. Third-party loggers
-    (e.g. ``urllib3``, ``requests``) stay at WARNING to avoid noisy output.
-
     Args:
         verbose: If True, set log level to DEBUG.
         quiet: If True, set log level to ERROR.
     """
-    if quiet:
-        level = logging.ERROR
-    elif verbose:
-        level = logging.DEBUG
-    else:
-        level = logging.INFO
-
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-
-    pkg_logger = logging.getLogger("air_download")
-    pkg_logger.setLevel(level)
-    pkg_logger.addHandler(handler)
+    configure_logging(verbose, quiet)
 
 
 def main(args: argparse.Namespace) -> None:

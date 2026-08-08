@@ -2,6 +2,7 @@
 
 import csv
 import logging
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,31 @@ _CSV_HEADER = [
     "description",
     "image_count",
 ]
+
+
+def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
+    """Configure logging based on verbosity flags.
+
+    Only the ``air_download`` logger is affected. Third-party loggers
+    (e.g. ``urllib3``, ``requests``) stay at WARNING to avoid noisy output.
+
+    Args:
+        verbose: If True, set log level to DEBUG.
+        quiet: If True, set log level to ERROR.
+    """
+    if quiet:
+        level = logging.ERROR
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+
+    pkg_logger = logging.getLogger("air_download")
+    pkg_logger.setLevel(level)
+    pkg_logger.addHandler(handler)
 
 
 def parse_datetime(value: str) -> datetime:
