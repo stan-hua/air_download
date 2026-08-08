@@ -11,3 +11,11 @@ accessions.csv
 *.csv
 output*/
 *.zip
+
+# Patient spreadsheets, and cohort downloads whose folder names are
+# themselves MRNs. The archives inside are covered by *.zip, the folders
+# are not.
+*.xlsx
+*.xls
+cohort/
+cohort-*/
