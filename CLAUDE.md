@@ -33,6 +33,7 @@ Request flow for every operation is: `cli.py` parses args → constructs `AIRCli
 - **`utils.py`** — `build_exam_output_path` (directory vs. `.zip` path disambiguation, index suffix to avoid overwriting) and `write_exams_csv` (appends to `<output>/accessions.csv`, header written only when the file is new).
 - **`cli.py`** — arg parsing, logging setup, table printing. `_configure_logging` deliberately only touches the `air_download` logger so `urllib3`/`requests` stay quiet.
 - **`match.py`** — cohort building, not API access: pairs two search-result CSVs into ultrasound→CT matches. Its own `air_match` entry point, and the one module written to the **Conventions** below (`fire.Fire()`, NumPy docstrings, grouped imports), since it was added after they were set. New modules should follow it rather than the older files.
+- **`cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/<mrn>/<MM-DD-YY>/{us,ct}/`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions** below, like `match.py`.
 - **`air_download/air_download.py`** — backward-compat shim re-exporting the public names. Add new code to the focused modules, not here.
 
 ### Download protocol quirks
@@ -84,6 +85,12 @@ Rows missing either field are skipped with a warning rather than queried on a pa
 Three rules define a qualifying pair, and each has a test pinning it: same patient **by MRN** (never by accession, which repeats across patients), CT **strictly after** the ultrasound (equal timestamps do not qualify — neither followed the other), and within `max_hours` **inclusive** at the boundary. Comparisons use timezone-aware datetimes so mixed offsets and midnight crossings are correct; don't reduce them to naive dates.
 
 Default keeps the earliest qualifying CT per ultrasound; `--all_pairs` emits all. Output is overwritten rather than appended, deliberately unlike `write_exams_csv`. Log counts only — never MRNs or accession numbers.
+
+### Cohort download layout (`cohort.py`)
+
+The visit folder is the **ultrasound's** date (`MM-DD-YY`), not the CT's, so a CT that crossed midnight still files under the FAST it followed. That assumes one FAST-CT visit per patient per day; a second pair claiming the same folder gets an index suffix and a warning rather than merging two visits into one.
+
+`--thinnest-axial` is not a flag here — CT always gets SR + thinnest axial, US always gets every series. `--skip_existing` (default on) is what makes `--n 1` → inspect → full run cheap, and it is also the resume path; `_download_single_exam` opens with `"wb"`, so without it a re-run re-fetches everything. A failed exam is counted and the loop continues. Exception detail is logged at DEBUG only, since it can carry an identifier.
 
 Several ultrasounds can precede one CT, so a CT accession can repeat across rows. `n_preceding_us` / `us_rank_before_ct` / `is_closest_us` make that explicit, and a run warns via `count_ambiguous_cts`. The count is taken over **all** of the patient's ultrasounds, not just the paired ones, so a CT stays flagged when a preceding ultrasound was paired elsewhere — it describes the clinical picture, not the pairing strategy. Rank is resolved by identity (`u is us`), not equality, because two ultrasounds can share a timestamp and compare equal as dicts.
 

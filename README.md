@@ -108,6 +108,7 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run list-projects` | `air_download -lpj` | List available project IDs |
 | `pixi run list-profiles` | `air_download -lpf` | List available anonymization profiles |
 | `pixi run match` | `air_match` | Match ultrasound exams to the CTs that followed |
+| `pixi run download-cohort` | `air_cohort` | Download a matched cohort into per-patient visit folders |
 | `pixi run test` | `pytest` | Run the test suite |
 
 ### Core workflows
@@ -346,7 +347,42 @@ print(len(rows), 'rows kept')
 
 Timestamps are compared as absolute instants, so mixed UTC offsets and pairs crossing midnight are handled correctly. Rows without an MRN or with an unreadable `date_time` are skipped and counted in a warning; identifiers are never logged. The output file is **overwritten**, not appended to, unlike `accessions.csv`.
 
-Both inputs need `mrn`, `accession_number`, and `date_time` columns — any CSV with those works, not just one this tool wrote. Feed the result back in for downloading by splitting out whichever accession column you want:
+Both inputs need `mrn`, `accession_number`, and `date_time` columns — any CSV with those works, not just one this tool wrote.
+
+#### Downloading a matched cohort
+
+`pixi run download-cohort` takes the matched CSV directly and lays the exams out one folder per patient, one subfolder per visit:
+
+```bash
+pixi run download-cohort --matched_csv matched_us_ct.csv \
+    --output output-cohort/ --cred_path ~/air_login.txt
+```
+
+```
+output-cohort/
+└── <mrn>/
+    └── 03-02-21/            # the date of the FAST
+        ├── us/<us_accession>.zip
+        └── ct/<ct_accession>.zip
+```
+
+The visit folder is named for the **ultrasound's** date, so a CT that crossed midnight still files under the FAST that preceded it. The ultrasound keeps every series; the CT is reduced to its structured report plus the thinnest axial series, exactly as `--thinnest-axial` does — that split is built in, so there is no per-modality flag to remember.
+
+Only `mrn`, `us_accession_number`, `us_date_time`, and `ct_accession_number` are read, so a CSV from an older `match` run works too. Rows missing any of the four are skipped and counted in a warning.
+
+Verify before committing to a long download. `--dry_run` prints the paths and makes no network call; `--n` downloads just the first rows for real:
+
+```bash
+pixi run download-cohort --matched_csv matched_us_ct.csv --output output-cohort/ --dry_run
+pixi run download-cohort --matched_csv matched_us_ct.csv --output output-cohort/ \
+    --cred_path ~/air_login.txt --n 1
+```
+
+An archive already on disk is skipped (`--skip_existing`, on by default), so the verification pair is not fetched twice when you then run the whole cohort, and an interrupted run resumes where it stopped. A failed exam is counted and the run continues rather than aborting; re-run to retry it. Only counts are logged — never an MRN or accession number.
+
+> The output tree is **named** with MRNs and accession numbers. `.gitignore` covers `*.zip` and `output*/`, so an output directory whose name starts with `output` is ignored whole. If you point `--output` somewhere else, add it to `.gitignore` — the archives are ignored by extension, but the PHI-named folders are not.
+
+To download only one side of the cohort instead, split out whichever accession column you want and use `--accessions-csv`:
 
 ```bash
 pixi run python -c "
