@@ -32,6 +32,12 @@ dev = [
     "pytest>=7.0",
 ]
 
+# State the package explicitly. Downloads land in a directory in the working
+# tree, and flat-layout auto-discovery would take one (e.g. cohort/) for a
+# second top-level package and refuse to build.
+[tool.setuptools.packages.find]
+include = ["air_download*"]
+
 # ---------------------------------------------------------------------------
 # pixi (the only supported package manager for this project)
 # ---------------------------------------------------------------------------
