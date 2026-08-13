@@ -24,8 +24,8 @@ Repository = "https://github.com/rauschecker-sugrue-labs/air_download"
 
 [project.scripts]
 air_download = "air_download.cli:cli"
-air_match = "air_download.match:cli"
-air_cohort = "air_download.cohort:cli"
+air_match = "air_download.us_ct.match:cli"
+air_cohort = "air_download.us_ct.cohort:cli"
 air_probe = "air_download.probe:cli"
 
 [project.optional-dependencies]

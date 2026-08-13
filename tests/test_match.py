@@ -8,7 +8,7 @@ import csv
 
 import pytest
 
-from air_download.match import (
+from air_download.us_ct.match import (
     MATCH_CSV_HEADER,
     count_ambiguous_cts,
     match_exams,

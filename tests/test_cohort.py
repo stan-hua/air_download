@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 # Custom libraries
-from air_download import cohort
-from air_download.cohort import (
+from air_download.us_ct import cohort
+from air_download.us_ct.cohort import (
     _safe_component,
     build_visit_paths,
     download_cohort,

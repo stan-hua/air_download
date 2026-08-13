@@ -32,8 +32,10 @@ Request flow for every operation is: `cli.py` parses args → constructs `AIRCli
 - **`filters.py`** — `apply_inclusion_filter` / `apply_exclusion_filter`. Both take a comma-separated pattern string and do case-insensitive substring matching with OR logic over one dict field. They are applied to *exams* (on `modality` / `description`) inside `search()`, and to *series* (on `description`) inside `_download_single_exam`. Inclusion runs before exclusion. Also holds the `--thinnest-axial` series selection (see below).
 - **`utils.py`** — `build_exam_output_path` (directory vs. `.zip` path disambiguation, index suffix to avoid overwriting) and `write_exams_csv` (appends to `<output>/accessions.csv`, header written only when the file is new).
 - **`cli.py`** — arg parsing, logging setup, table printing. `_configure_logging` deliberately only touches the `air_download` logger so `urllib3`/`requests` stay quiet.
-- **`match.py`** — cohort building, not API access: pairs two search-result CSVs into ultrasound→CT matches. Its own `air_match` entry point, and the one module written to the **Conventions** below (`fire.Fire()`, NumPy docstrings, grouped imports), since it was added after they were set. New modules should follow it rather than the older files.
-- **`cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/<mrn>/<MM-DD-YY>/{us,ct}/`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions** below, like `match.py`.
+- **`us_ct/`** — the subpackage holding everything that assumes an ultrasound→CT pairing specifically. The boundary is the point: a module belongs here if it names `us`/`ct` in its flags, columns, or output layout, and outside it if it generalises. `probe.py` is deliberately outside, since it reads a pairing's modalities off the CSV header. Don't add general-purpose code here, and don't teach these two modules a third modality — a general matcher would be a new module, not a widening of these.
+  - **`us_ct/match.py`** — cohort building, not API access: pairs two search-result CSVs into ultrasound→CT matches. Its own `air_match` entry point, and the first module written to the **Conventions** below (`fire.Fire()`, NumPy docstrings, grouped imports), since it was added after they were set. New modules should follow it rather than the older files.
+  - **`us_ct/cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/<mrn>/<MM-DD-YY>/{us,ct}/`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions**, like `match.py`.
+- **`probe.py`** — lists an exam's series without downloading it, for any matched pairing or a plain search CSV. Own `air_probe` entry point.
 - **`air_download/air_download.py`** — backward-compat shim re-exporting the public names. Add new code to the focused modules, not here.
 
 ### Download protocol quirks
@@ -80,7 +82,7 @@ Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns
 
 Rows missing either field are skipped with a warning rather than queried on a partial key; exact duplicate pairs are collapsed, which matters because `write_exams_csv` appends and re-running a search doubles every row. `cli.py` splits into `_run_from_csv` (drives its own progress bar, merges results and writes the CSV once under `--search-only`) and `_run_single_query`. The per-exam bar in `download()` is disabled for single-exam results so a 25k-row CSV doesn't leave 25k bars behind.
 
-### Cohort matching (`match.py`)
+### Cohort matching (`us_ct/match.py`)
 
 Three rules define a qualifying pair, and each has a test pinning it: same patient **by MRN** (never by accession, which repeats across patients), CT **strictly after** the ultrasound (equal timestamps do not qualify — neither followed the other), and within `max_hours` **inclusive** at the boundary. Comparisons use timezone-aware datetimes so mixed offsets and midnight crossings are correct; don't reduce them to naive dates.
 
@@ -98,9 +100,9 @@ Lists what an exam contains without downloading it. `AIRClient.list_series` is t
 
 `read_exam_pairs` dispatches on the CSV header. `matched_modalities` reads the pairing's modalities off it via `^(.+)_accession_number$`, so **nothing about US/CT is hard-coded** — any pairing works, and `--modalities` selects among what the file declares. An unprefixed `accession_number` deliberately fails that regex, which is exactly what distinguishes a search-result CSV; that branch delegates to `utils.read_accession_pairs`. Don't reintroduce a fixed column list.
 
-It cannot reuse `cohort.read_matched_pairs`, whose `REQUIRED_COLUMNS` fixes the us/ct shape; the matched branch parses rows itself but keeps the same rules — MRN and accession required together, blanks skipped and counted, duplicate pairs collapsed (which matters because `--search-only` appends). Output is overwritten, like `match.py` and unlike `write_exams_csv`.
+It cannot reuse `us_ct/cohort.py`'s `read_matched_pairs`, whose `REQUIRED_COLUMNS` fixes the us/ct shape; the matched branch parses rows itself but keeps the same rules — MRN and accession required together, blanks skipped and counted, duplicate pairs collapsed (which matters because `--search-only` appends). Output is overwritten, like `match.py` and unlike `write_exams_csv`.
 
-### Cohort download layout (`cohort.py`)
+### Cohort download layout (`us_ct/cohort.py`)
 
 The visit folder is the **ultrasound's** date (`MM-DD-YY`), not the CT's, so a CT that crossed midnight still files under the FAST it followed. That assumes one FAST-CT visit per patient per day; a second pair claiming the same folder gets an index suffix and a warning rather than merging two visits into one.
 
