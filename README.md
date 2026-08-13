@@ -237,13 +237,13 @@ pixi run download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude 
 pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
 ```
 
-#### Keeping only the structured report and the thinnest axial CT
+#### Keeping only the thinnest axial CT series
 
 ```bash
 pixi run download -m CT -ds 2024-01-01 -c ~/air_login.txt -o output/ --thinnest-axial
 ```
 
-For each exam this keeps every structured report (SR) series plus the single axial CT series with the thinnest slices, dropping scouts, reformats, and the thicker axial reconstructions:
+For each exam this keeps exactly **one** series — the axial CT reconstruction with the thinnest slices — and drops everything else: scouts, reformats, the thicker axial reconstructions, and structured reports:
 
 ```
 SCOUT                 2 images   CT   dropped
@@ -251,26 +251,30 @@ AXIAL 5MM STD        60 images   CT   dropped
 AXIAL 0.625MM BONE  480 images   CT   kept    <- thinnest
 AXIAL 2.5MM SOFT    120 images   CT   dropped
 COR 3MM MPR          90 images   CT   dropped
-Dose Report           1 image    SR   kept
+Dose Report           1 image    SR   dropped
 ```
+
+Structured reports carry no image data, so they are dropped with the rest. If you want them, leave `--thinnest-axial` off and narrow with `-s`/`-s-exclude` instead.
 
 <a id="what-the-api-reports-per-series"></a>
 **What the API reports per series.** Only `description`, `imageCount`, `modality`, `seriesNumber`, and `seriesUid` — there is no slice thickness, no imaging plane, no body part, and no protocol name anywhere in the API. `imageCount` counts DICOM **objects, not frames**, so a multi-frame cine clip counts once however long it runs. Everything below follows from that gap, and it is why series selection has to read descriptions.
 
-Structured reports are identified by their series **modality**, which the API reports exactly, so that half is not a guess. The axial selection is a heuristic:
+The selection is therefore a heuristic:
 
 - **Axial** means the description contains `ax`, `axial`, `tra`, `trans`, or `transverse` as a **whole word**, case-insensitive. Whole-word matching is what keeps `THORAX` and `TRAUMA` from counting as axial. Override with `--axial-patterns "ax,axial"` if your site names things differently.
 - **Thinnest** is read from the description when the protocol states it — `AXIAL 0.625MM` → 0.625mm. Values below 0.1mm or above 20mm are ignored as something other than a thickness (a field of view, for instance), and the smallest plausible value wins if several appear.
 - **If no axial series states a thickness**, the one with the most images is chosen instead, on the basis that more images means thinner slices at equal coverage. This is logged when it happens, since it is wrong if the series cover different anatomy.
-- **If nothing matches as axial**, a warning names the patterns tried and only the structured reports are kept.
+- **If nothing matches as axial**, a warning names the patterns tried and **nothing is kept** — no archive is written for that exam. Widen `--axial-patterns` and re-run.
 
 Run it under `-v` the first few times to see which series each exam actually selected:
 
 ```bash
 pixi run download 11111111 -c ~/air_login.txt -o output/ --thinnest-axial -v
 INFO: Thinnest axial series: 'AXIAL 0.625MM BONE' (0.625mm, 480 images).
-INFO: Series selection: from 6 to 2 (1 structured report(s)).
+INFO: Series selection: from 6 to 1 (thinnest axial).
 ```
+
+Better still, preview the choice across a whole cohort without downloading anything — see [`--select thinnest_axial`](#inspecting-an-exams-series-without-downloading-it).
 
 `--thinnest-axial` runs after `-s` and `-s-exclude`, so those can pre-trim the candidates.
 
@@ -300,7 +304,7 @@ Note that `--search-only` **appends** to `accessions.csv` if one is already ther
 Feed the CSV straight back in with `--accessions-csv`:
 
 ```bash
-# CT: keep only the structured report and the thinnest axial series
+# CT: keep only the thinnest axial series
 pixi run download --accessions-csv output-ct_abdomen_pelvis/accessions.csv \
     -o ct_dicom/ --thinnest-axial
 
@@ -467,7 +471,7 @@ output-cohort/
         └── ct/<ct_accession>.zip
 ```
 
-The visit folder is named for the **ultrasound's** date, so a CT that crossed midnight still files under the FAST that preceded it. The ultrasound keeps every series; the CT is reduced to its structured report plus the thinnest axial series, exactly as `--thinnest-axial` does — that split is built in, so there is no per-modality flag to remember.
+The visit folder is named for the **ultrasound's** date, so a CT that crossed midnight still files under the FAST that preceded it. The ultrasound keeps every series; the CT is reduced to its thinnest axial series alone, exactly as `--thinnest-axial` does — that split is built in, so there is no per-modality flag to remember. A CT with no axial series yields no archive and is counted as failed, so check the log rather than assuming a silent success.
 
 Only `mrn`, `us_accession_number`, `us_date_time`, and `ct_accession_number` are read, so a CSV from an older `match` run works too. Rows missing any of the four are skipped and counted in a warning.
 
@@ -528,6 +532,31 @@ pixi run probe --input_csv matched_us_ct_mr.csv --modalities us,mr    # two of t
 ```
 
 Asking for a modality the file does not pair fails immediately, naming the ones it does. On a search-result CSV there are no modalities to choose between, so `--modalities` is ignored with a warning rather than silently.
+
+##### Previewing what `--thinnest-axial` would keep
+
+By default probe reports every series, which is not the same as what a download would fetch. `--select thinnest_axial` runs the same selection the downloader uses and **marks** the rows rather than dropping them, so you can still see what was passed over:
+
+```bash
+pixi run probe --input_csv matched_us_ct.csv --modalities ct \
+               --select thinnest_axial --cred_path ~/air_login.txt
+```
+
+```
+CT-A   CT SCOUT                   2
+CT-A   CT AXIAL 5MM STD          60
+CT-A   CT AXIAL 0.625MM BONE    480  <== selected
+CT-A   CT COR 3MM MPR            90
+CT-A   SR Dose Report             1
+```
+
+With `--summary` each exam instead gains `selected_description` and `selected_image_count`, which is what you sort on to find exams where the heuristic picked something surprising:
+
+```
+CT-A   n_series=5 total=633 selected=AXIAL 0.625MM BONE  selected_count=480
+```
+
+Note `total_series_image_count` (633) counts what *exists*; `selected_image_count` (480) counts what you would actually retrieve. `--axial-patterns` works here exactly as it does on the downloader, so you can test a widened pattern set before committing to it. An exam with no matching axial series gets a blank selection — expected for anything that is not a CT — and the run warns with a count.
 
 The counts and descriptions it reports are the whole of what the API exposes per series — see [What the API reports per series](#what-the-api-reports-per-series). Treat them as evidence, not ground truth.
 
@@ -657,12 +686,13 @@ options:
                         Comma-separated list of series exclusion patterns
                         (case-insensitive, OR logic). Excludes matching
                         series. (default: None)
-  --thinnest-axial      For each exam, keep only the structured report (SR)
-                        series plus the single axial CT series with the
-                        thinnest slices. Thickness is read from the series
-                        description (e.g. '0.625MM'); if no axial series
-                        states one, the series with the most images wins.
-                        Applied after -s and -s-exclude. (default: False)
+  --thinnest-axial      For each exam, keep only the single axial CT series
+                        with the thinnest slices, dropping everything else
+                        including structured reports. Thickness is read from
+                        the series description (e.g. '0.625MM'); if no axial
+                        series states one, the series with the most images
+                        wins. An exam with no axial series is skipped. Applied
+                        after -s and -s-exclude. (default: False)
   --axial-patterns AXIAL_PATTERNS
                         Comma-separated plane names identifying an axial
                         series, matched as whole words in the description
@@ -725,7 +755,7 @@ exams = client.search(
     exam_modality_exclusion="localizer"
 )
 
-# Keep only the structured report and the thinnest axial CT series
+# Keep only the thinnest axial CT series
 client.download(
     accession="11111111",
     output=Path("output/"),

@@ -69,12 +69,14 @@ The data source caps results per query, so `search()` never issues one request. 
 
 What the API gives you per series is only `description`, `imageCount`, `modality`, `seriesNumber`, `seriesUid` — **no slice thickness and no plane**. That asymmetry drives the whole design in `filters.py`:
 
-- Structured reports are selected on `modality == "SR"`, which is exact.
+- The selection keeps **exactly one series or none** — the thinnest axial reconstruction. Structured reports are *not* kept: they were until 2026-08, and were dropped deliberately because they carry no image data. Don't reinstate them.
 - Axial detection and thickness are heuristics over `description`, and are therefore configurable and loudly logged. Don't present them as reliable.
 
 Details worth preserving: axial patterns match as **whole words** (`\b…\b`) specifically so `THORAX` and `TRAUMA` don't register as axial — plain substring matching, as used elsewhere in this module, would break that. `parse_slice_thickness` bounds values to 0.1–20mm so a field of view like `FOV 512MM` isn't mistaken for a thickness. When no axial series states a thickness, selection falls back to max `imageCount` and says so at INFO, because that proxy is wrong when candidate series cover different anatomy. Candidates are series whose modality is `CT` or absent; the absent case exists so a data source that omits the field doesn't select nothing.
 
-Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns SR-only (with a warning) rather than everything when no axial matches — silently downloading a whole study would be worse than downloading too little.
+Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns **empty** (with a warning naming the consequence) rather than everything when no axial matches — silently downloading a whole study would be worse than downloading nothing. Empty means `_download_single_exam` writes no archive, which `cohort.py` then counts as a failed exam; that chain is intentional, so a miss is visible rather than silent.
+
+`keep_thinnest_axial` is the public entry point (returns a list); `select_thinnest_axial` is the picker (returns one series or None) and is what `probe.py` calls, since the picker stays quiet when nothing qualifies and the wrapper warns.
 
 ### Bulk input (`--accessions-csv`)
 
@@ -102,11 +104,13 @@ Lists what an exam contains without downloading it. `AIRClient.list_series` is t
 
 It cannot reuse `us_ct/cohort.py`'s `read_matched_pairs`, whose `REQUIRED_COLUMNS` fixes the us/ct shape; the matched branch parses rows itself but keeps the same rules — MRN and accession required together, blanks skipped and counted, duplicate pairs collapsed (which matters because `--search-only` appends). Output is overwritten, like `match.py` and unlike `write_exams_csv`.
 
+`--select thinnest_axial` previews what the downloader would keep, and **marks rows rather than dropping them** — the point is to see what was passed over, so don't "simplify" it into a filter. Header columns are added conditionally via `probe_csv_header`, so a run without `--select` has no misleading empty column. A summary row's `selected_image_count` is blank, never `0`, when nothing qualifies: "no axial series" must not read as "an axial series holding no images".
+
 ### Cohort download layout (`us_ct/cohort.py`)
 
 The visit folder is the **ultrasound's** date (`MM-DD-YY`), not the CT's, so a CT that crossed midnight still files under the FAST it followed. That assumes one FAST-CT visit per patient per day; a second pair claiming the same folder gets an index suffix and a warning rather than merging two visits into one.
 
-`--thinnest-axial` is not a flag here — CT always gets SR + thinnest axial, US always gets every series. `--skip_existing` (default on) is what makes `--n 1` → inspect → full run cheap, and it is also the resume path; `_download_single_exam` opens with `"wb"`, so without it a re-run re-fetches everything. A failed exam is counted and the loop continues. Exception detail is logged at DEBUG only, since it can carry an identifier.
+`--thinnest-axial` is not a flag here — CT always gets the thinnest axial series alone, US always gets every series. `--skip_existing` (default on) is what makes `--n 1` → inspect → full run cheap, and it is also the resume path; `_download_single_exam` opens with `"wb"`, so without it a re-run re-fetches everything. A failed exam is counted and the loop continues. Exception detail is logged at DEBUG only, since it can carry an identifier.
 
 Several ultrasounds can precede one CT, so a CT accession can repeat across rows. `n_preceding_us` / `us_rank_before_ct` / `is_closest_us` make that explicit, and a run warns via `count_ambiguous_cts`. The count is taken over **all** of the patient's ultrasounds, not just the paired ones, so a CT stays flagged when a preceding ultrasound was paired elsewhere — it describes the clinical picture, not the pairing strategy. Rank is resolved by identity (`u is us`), not equality, because two ultrasounds can share a timestamp and compare equal as dicts.
 
