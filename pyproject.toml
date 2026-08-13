@@ -26,6 +26,7 @@ Repository = "https://github.com/rauschecker-sugrue-labs/air_download"
 air_download = "air_download.cli:cli"
 air_match = "air_download.match:cli"
 air_cohort = "air_download.cohort:cli"
+air_probe = "air_download.probe:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -81,4 +82,5 @@ list-projects = { cmd = "air_download -lpj", description = "List available proje
 list-profiles = { cmd = "air_download -lpf", description = "List available anonymization profiles" }
 match = { cmd = "air_match", description = "Match ED ultrasound exams to the CTs that followed" }
 download-cohort = { cmd = "air_cohort", description = "Download a matched US-CT cohort into per-patient visit folders" }
+probe = { cmd = "air_probe", description = "List the series inside candidate exams without downloading them" }
 test = { cmd = "pytest", description = "Run the test suite" }
