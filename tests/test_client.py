@@ -143,3 +143,40 @@ class TestCredentials:
         username, password = client._get_credentials()
         assert username == "envuser"
         assert password == "envpass"
+
+
+class TestListSeries:
+    """Listing an exam's series is a plain query, not part of a download."""
+
+    @staticmethod
+    def _client(monkeypatch):
+        monkeypatch.setenv("AIR_URL", "https://example.com/api/")
+        monkeypatch.setenv("AIR_USERNAME", "envuser")
+        monkeypatch.setenv("AIR_PASSWORD", "envpass")
+        client = AIRClient()
+        # Skip authentication; only the request itself is under test.
+        client._jwt = "token"
+        return client
+
+    def test_posts_the_study_verbatim_and_returns_the_series(self, monkeypatch):
+        client = self._client(monkeypatch)
+        series = [{"description": "RUQ", "imageCount": 3, "modality": "US"}]
+        calls = []
+
+        class Response:
+            def json(self):
+                return series
+
+        def fake_post(endpoint, **kwargs):
+            calls.append((endpoint, kwargs))
+            return Response()
+
+        monkeypatch.setattr(client, "_post", fake_post)
+        study = {"accessionNumber": "U1", "studyUid": "1.2.3", "deviceId": 0}
+        assert client.list_series(study) == series
+
+        (endpoint, kwargs) = calls[0]
+        assert endpoint == "secure/search/series"
+        assert kwargs["json"] is study
+        # No download endpoint may be touched.
+        assert len(calls) == 1

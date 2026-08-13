@@ -608,6 +608,31 @@ class AIRClient:
         )
         return exams
 
+    def list_series(self, study: dict[str, Any]) -> list[dict[str, Any]]:
+        """List the series belonging to one study.
+
+        A plain query, not part of the download handshake: it queues no
+        retrieval job and transfers no image data, so it is cheap enough to
+        run over a whole cohort just to inspect what each exam contains.
+
+        The API reports only ``description``, ``imageCount``, ``modality``,
+        ``seriesNumber``, and ``seriesUid`` per series. ``imageCount`` counts
+        DICOM objects rather than frames, so a multi-frame cine clip counts
+        once however long it runs.
+
+        Args:
+            study: An exam dictionary from :meth:`search`, passed back to the
+                server verbatim as the API expects.
+
+        Returns:
+            The study's series, in the order the API returned them.
+        """
+        return self._post(
+            "secure/search/series",
+            headers=self._auth_header,
+            json=study,
+        ).json()
+
     def _check_download_started(
         self, download_info: dict[str, Any], project: int
     ) -> bool:
@@ -827,11 +852,7 @@ class AIRClient:
         """
         exam_output_fp = build_exam_output_path(output, study, exam_index)
 
-        series = self._post(
-            "secure/search/series",
-            headers=self._auth_header,
-            json=study,
-        ).json()
+        series = self.list_series(study)
 
         series = apply_inclusion_filter(series, "description", series_inclusion)
         series = apply_exclusion_filter(series, "description", series_exclusion)
