@@ -19,3 +19,4 @@ output*/
 *.xls
 cohort/
 cohort-*/
+tmp/
