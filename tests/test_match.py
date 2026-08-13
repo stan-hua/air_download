@@ -13,6 +13,7 @@ from air_download.match import (
     count_ambiguous_cts,
     match_exams,
     read_exams,
+    select_one_us_per_ct,
     write_matches_csv,
 )
 
@@ -26,17 +27,24 @@ def write_csv(tmp_path, name, *rows, header=HEADER):
     return path
 
 
-def exam(mrn, accession, when, description="EXAM"):
-    """Build a parsed exam the way read_exams would."""
+def exam(mrn, accession, when, description="EXAM", image_count=None):
+    """Build a parsed exam the way read_exams would.
+
+    ``image_count`` is left out entirely when None, mirroring an older
+    accessions.csv written before the column existed.
+    """
     from air_download.utils import parse_datetime
 
-    return {
+    built = {
         "mrn": mrn,
         "accession_number": accession,
         "date_time": when,
         "description": description,
         "when": parse_datetime(when),
     }
+    if image_count is not None:
+        built["image_count"] = image_count
+    return built
 
 
 class TestReadExams:
@@ -362,6 +370,140 @@ class TestWriteMatchesCsv:
     def test_empty_matches_still_writes_header(self, tmp_path):
         out = write_matches_csv([], tmp_path / "matched.csv")
         assert out.read_text().strip() == ",".join(MATCH_CSV_HEADER)
+
+
+class TestImageCounts:
+    """The image counts carried through from the search results."""
+
+    def test_counts_are_carried_through(self):
+        us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14")]
+        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00", image_count="480")]
+        (row,) = match_exams(us, ct)
+        assert row["us_image_count"] == "14"
+        assert row["ct_image_count"] == "480"
+
+    def test_csv_without_the_column_still_matches(self, tmp_path):
+        # An accessions.csv predating image_count must keep working.
+        header = "mrn,accession_number,date_time,sex,birthdate,description"
+        us_csv = write_csv(
+            tmp_path, "us.csv", "A1,U1,2021-03-02T08:00:00-08:00,,,US", header=header
+        )
+        ct_csv = write_csv(
+            tmp_path, "ct.csv", "A1,C1,2021-03-02T14:00:00-08:00,,,CT", header=header
+        )
+        (row,) = match_exams(read_exams(us_csv), read_exams(ct_csv))
+        assert row["us_image_count"] == ""
+        assert row["ct_image_count"] == ""
+
+
+class TestSelectOneUsPerCt:
+    """Narrowing a CT preceded by several ultrasounds down to one."""
+
+    @staticmethod
+    def _two_us_one_ct():
+        """U1 is earlier but larger; U2 is nearer the CT but smaller."""
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
+            exam("A1", "U2", "2021-03-02T10:00:00-08:00", image_count="3"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00", image_count="480")]
+        return match_exams(us, ct)
+
+    def test_all_is_a_passthrough(self):
+        matches = self._two_us_one_ct()
+        kept, without = select_one_us_per_ct(matches, "all")
+        assert kept is matches
+        assert without == 0
+
+    def test_closest_keeps_the_later_ultrasound(self):
+        kept, without = select_one_us_per_ct(self._two_us_one_ct(), "closest")
+        assert [r["us_accession_number"] for r in kept] == ["U2"]
+        assert without == 0
+
+    def test_most_images_keeps_the_larger_ultrasound(self):
+        kept, without = select_one_us_per_ct(self._two_us_one_ct(), "most_images")
+        assert [r["us_accession_number"] for r in kept] == ["U1"]
+        assert without == 0
+
+    def test_most_images_falls_back_to_closest_without_counts(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00"),
+            exam("A1", "U2", "2021-03-02T10:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
+        kept, without = select_one_us_per_ct(match_exams(us, ct), "most_images")
+        assert [r["us_accession_number"] for r in kept] == ["U2"]
+        assert without == 1
+
+    def test_most_images_ignores_a_row_with_no_count(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
+            exam("A1", "U2", "2021-03-02T10:00:00-08:00"),
+        ]
+        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
+        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
+        assert [r["us_accession_number"] for r in kept] == ["U1"]
+
+    @pytest.mark.parametrize("strategy", ["closest", "most_images"])
+    @pytest.mark.parametrize("all_pairs", [False, True])
+    def test_no_ct_is_dropped(self, strategy, all_pairs):
+        # Ranking within the group, rather than filtering on is_closest_us,
+        # is what guarantees every emitted CT keeps exactly one row.
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
+            exam("A1", "U2", "2021-03-02T10:00:00-08:00", image_count="3"),
+            exam("A1", "U3", "2021-03-02T12:00:00-08:00"),
+        ]
+        ct = [
+            exam("A1", "C1", "2021-03-02T11:00:00-08:00"),
+            exam("A1", "C2", "2021-03-02T14:00:00-08:00"),
+        ]
+        matches = match_exams(us, ct, all_pairs=all_pairs)
+        kept, _ = select_one_us_per_ct(matches, strategy)
+        before = {m["ct_accession_number"] for m in matches}
+        assert {r["ct_accession_number"] for r in kept} == before
+        assert len(kept) == len(before)
+
+    def test_one_row_survives_per_ct(self):
+        kept, _ = select_one_us_per_ct(self._two_us_one_ct(), "closest")
+        assert len(kept) == 1
+
+    def test_untouched_when_nothing_is_contested(self):
+        us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14")]
+        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
+        matches = match_exams(us, ct)
+        kept, _ = select_one_us_per_ct(matches, "most_images")
+        assert kept == matches
+
+    def test_patients_are_kept_apart(self):
+        # The same CT accession under two MRNs must not collapse into one.
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
+            exam("A2", "U2", "2021-03-02T08:00:00-08:00", image_count="9"),
+        ]
+        ct = [
+            exam("A1", "C1", "2021-03-02T14:00:00-08:00"),
+            exam("A2", "C1", "2021-03-02T14:00:00-08:00"),
+        ]
+        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
+        assert len(kept) == 2
+
+    def test_preserves_original_row_order(self):
+        us = [
+            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
+            exam("A1", "U2", "2021-03-02T10:00:00-08:00", image_count="3"),
+            exam("A2", "U3", "2021-03-02T08:00:00-08:00", image_count="7"),
+        ]
+        ct = [
+            exam("A1", "C1", "2021-03-02T14:00:00-08:00"),
+            exam("A2", "C2", "2021-03-02T14:00:00-08:00"),
+        ]
+        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
+        assert [r["us_accession_number"] for r in kept] == ["U1", "U3"]
+
+    def test_rejects_an_unknown_strategy(self):
+        with pytest.raises(ValueError, match="Unknown us_selection"):
+            select_one_us_per_ct([], "latest")
 
 
 class TestEndToEnd:

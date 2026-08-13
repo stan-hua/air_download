@@ -20,6 +20,12 @@ Widen the window and keep every qualifying CT per ultrasound::
 
     pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
                    --max_hours 48 --all_pairs --output matched_48h.csv
+
+Where several ultrasounds precede one CT, keep only the one holding the most
+DICOM objects rather than the one nearest in time::
+
+    pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
+                   --us_selection most_images
 """
 
 # Standard libraries
@@ -40,14 +46,21 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_HOURS = 24.0
 
+# How to pick one ultrasound when several precede the same CT. "all" keeps
+# every candidate, which is the historical behaviour.
+US_SELECTION_STRATEGIES = ("all", "closest", "most_images")
+DEFAULT_US_SELECTION = "all"
+
 MATCH_CSV_HEADER = [
     "mrn",
     "us_accession_number",
     "us_date_time",
     "us_description",
+    "us_image_count",
     "ct_accession_number",
     "ct_date_time",
     "ct_description",
+    "ct_image_count",
     "hours_between",
     "n_preceding_us",
     "us_rank_before_ct",
@@ -204,9 +217,11 @@ def match_exams(
                         "us_accession_number": us.get("accession_number", ""),
                         "us_date_time": us.get("date_time", ""),
                         "us_description": us.get("description", ""),
+                        "us_image_count": us.get("image_count", ""),
                         "ct_accession_number": ct.get("accession_number", ""),
                         "ct_date_time": ct.get("date_time", ""),
                         "ct_description": ct.get("description", ""),
+                        "ct_image_count": ct.get("image_count", ""),
                         "hours_between": round(
                             _hours_between(us["when"], ct["when"]), 3
                         ),
@@ -216,6 +231,91 @@ def match_exams(
                     }
                 )
     return matches
+
+
+def _us_image_count(row: dict[str, Any]) -> int | None:
+    """Return a row's ultrasound image count, or None when it states none."""
+    try:
+        return int(str(row.get("us_image_count", "")).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def select_one_us_per_ct(
+    matches: list[dict[str, Any]],
+    strategy: str = DEFAULT_US_SELECTION,
+) -> tuple[list[dict[str, Any]], int]:
+    """Reduce each CT to a single ultrasound, by the requested strategy.
+
+    ``match_exams`` is driven by ultrasounds, so a CT preceded by several of
+    them appears on several rows. This narrows each ``(MRN, CT)`` group to one.
+
+    ``closest`` ranks within each group rather than filtering on
+    ``is_closest_us``. That flag is computed over every ultrasound the patient
+    has, not only the ones emitted for this CT, so filtering on it couples the
+    result to an invariant this function does not control; taking the highest
+    rank present guarantees exactly one survivor per CT regardless.
+
+    ``most_images`` prefers the ultrasound holding the most DICOM objects, on
+    the assumption that a multi-view FAST stores more than a single-view
+    bedside scan. It is a heuristic over ``image_count``, which counts objects
+    and not frames, so a cine clip counts once however long it runs.
+
+    Parameters
+    ----------
+    matches : list of dict
+        Rows from :func:`match_exams`.
+    strategy : str, optional
+        One of :data:`US_SELECTION_STRATEGIES`. ``all`` returns the rows
+        untouched.
+
+    Returns
+    -------
+    tuple
+        The kept rows, in their original order, and the number of groups that
+        stated no usable image count and so fell back to ``closest``.
+
+    Raises
+    ------
+    ValueError
+        If ``strategy`` is not a recognised value.
+    """
+    if strategy not in US_SELECTION_STRATEGIES:
+        raise ValueError(
+            f"Unknown us_selection '{strategy}'. Choose one of: "
+            f"{', '.join(US_SELECTION_STRATEGIES)}."
+        )
+    if strategy == "all":
+        return matches, 0
+
+    groups: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for index, row in enumerate(matches):
+        groups[(row["mrn"], row["ct_accession_number"])].append((index, row))
+
+    keep: set[int] = set()
+    without_counts = 0
+    for group in groups.values():
+        chosen = None
+        if strategy == "most_images":
+            counted = [
+                (count, index, row)
+                for index, row in group
+                if (count := _us_image_count(row)) is not None
+            ]
+            if counted:
+                # Most objects wins; a tie goes to the ultrasound nearer the CT.
+                chosen = max(
+                    counted, key=lambda item: (item[0], item[2]["us_rank_before_ct"])
+                )[1]
+            else:
+                without_counts += 1
+        if chosen is None:
+            # "closest", and where no row in the group stated an image count.
+            chosen = max(group, key=lambda item: item[1]["us_rank_before_ct"])[0]
+        keep.add(chosen)
+
+    kept = [row for index, row in enumerate(matches) if index in keep]
+    return kept, without_counts
 
 
 def count_ambiguous_cts(matches: list[dict[str, Any]]) -> int:
@@ -272,6 +372,7 @@ def match(
     output: str = "matched_us_ct.csv",
     max_hours: float = DEFAULT_MAX_HOURS,
     all_pairs: bool = False,
+    us_selection: str = DEFAULT_US_SELECTION,
     verbose: bool = False,
 ) -> None:
     """Match ultrasound exams to the CTs that followed, and write a CSV.
@@ -288,6 +389,10 @@ def match(
         Widest gap between the ultrasound and the CT, in hours.
     all_pairs : bool, optional
         Emit every qualifying CT per ultrasound rather than the earliest.
+    us_selection : str, optional
+        How to resolve a CT preceded by several ultrasounds: ``all`` (the
+        default) keeps every candidate, ``closest`` keeps the one nearest the
+        CT, ``most_images`` keeps the one with the largest ``image_count``.
     verbose : bool, optional
         Log at DEBUG level.
     """
@@ -296,33 +401,68 @@ def match(
         format="%(levelname)s: %(message)s",
     )
 
+    if us_selection not in US_SELECTION_STRATEGIES:
+        # Fail before reading two potentially large CSVs.
+        raise ValueError(
+            f"Unknown us_selection '{us_selection}'. Choose one of: "
+            f"{', '.join(US_SELECTION_STRATEGIES)}."
+        )
+
     us_exams = read_exams(Path(us_csv))
     ct_exams = read_exams(Path(ct_csv))
     matches = match_exams(us_exams, ct_exams, max_hours, all_pairs)
 
-    written = write_matches_csv(matches, Path(output))
-    matched_patients = len({m["mrn"] for m in matches})
+    # Measured before narrowing, so the report describes the data rather than
+    # whatever the strategy happened to keep.
+    ambiguous = count_ambiguous_cts(matches)
+    selected, without_counts = select_one_us_per_ct(matches, us_selection)
+    dropped = len(matches) - len(selected)
+
+    written = write_matches_csv(selected, Path(output))
+    matched_patients = len({m["mrn"] for m in selected})
     us_patients = len({e["mrn"] for e in us_exams})
     logger.info(
         "Matched %d ultrasound-CT pair(s) across %d patient(s) "
         "(of %d with an ultrasound), CT within %.6gh and strictly after. "
         "Written to %s.",
-        len(matches),
+        len(selected),
         matched_patients,
         us_patients,
         max_hours,
         written,
     )
-    ambiguous = count_ambiguous_cts(matches)
-    if ambiguous:
+    if dropped:
+        logger.info(
+            "Kept one ultrasound per CT by '%s', dropping %d of %d candidate "
+            "row(s).",
+            us_selection,
+            dropped,
+            len(matches),
+        )
+    if without_counts:
+        logger.warning(
+            "%d CT exam(s) had no ultrasound stating an image_count, so the "
+            "one nearest the CT was kept instead. Re-run the search to "
+            "populate image_count, or use air_probe to inspect their series.",
+            without_counts,
+        )
+    if ambiguous and us_selection == "all":
         logger.warning(
             "%d CT exam(s) had more than one ultrasound before them inside "
             "the window, so those CTs appear on several rows. Filter on "
-            "is_closest_us to keep one ultrasound per CT, or inspect "
-            "n_preceding_us and us_rank_before_ct to decide case by case.",
+            "is_closest_us to keep one ultrasound per CT, pass "
+            "--us_selection, or inspect n_preceding_us and us_rank_before_ct "
+            "to decide case by case.",
             ambiguous,
         )
-    if not matches:
+    elif ambiguous:
+        logger.info(
+            "%d CT exam(s) had more than one ultrasound before them inside "
+            "the window; '%s' chose between them.",
+            ambiguous,
+            us_selection,
+        )
+    if not selected:
         logger.warning(
             "No pairs matched. Check that both CSVs cover overlapping dates "
             "and that their MRNs come from the same source."
