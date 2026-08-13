@@ -225,6 +225,6 @@ class TestKeepThinnestAxial:
         assert len(keep_thinnest_axial(series)) == 1
 
     def test_returns_the_series_object_itself(self, study):
-        # Identity matters: probe marks rows by matching on the same object.
+        # Identity matters: callers may match the result against the input list.
         (selected,) = keep_thinnest_axial(study)
         assert any(s is selected for s in study)

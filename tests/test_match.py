@@ -411,42 +411,15 @@ class TestSelectOneUsPerCt:
 
     def test_all_is_a_passthrough(self):
         matches = self._two_us_one_ct()
-        kept, without = select_one_us_per_ct(matches, "all")
+        kept = select_one_us_per_ct(matches, "all")
         assert kept is matches
-        assert without == 0
 
     def test_closest_keeps_the_later_ultrasound(self):
-        kept, without = select_one_us_per_ct(self._two_us_one_ct(), "closest")
+        kept = select_one_us_per_ct(self._two_us_one_ct(), "closest")
         assert [r["us_accession_number"] for r in kept] == ["U2"]
-        assert without == 0
 
-    def test_most_images_keeps_the_larger_ultrasound(self):
-        kept, without = select_one_us_per_ct(self._two_us_one_ct(), "most_images")
-        assert [r["us_accession_number"] for r in kept] == ["U1"]
-        assert without == 0
-
-    def test_most_images_falls_back_to_closest_without_counts(self):
-        us = [
-            exam("A1", "U1", "2021-03-02T08:00:00-08:00"),
-            exam("A1", "U2", "2021-03-02T10:00:00-08:00"),
-        ]
-        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
-        kept, without = select_one_us_per_ct(match_exams(us, ct), "most_images")
-        assert [r["us_accession_number"] for r in kept] == ["U2"]
-        assert without == 1
-
-    def test_most_images_ignores_a_row_with_no_count(self):
-        us = [
-            exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14"),
-            exam("A1", "U2", "2021-03-02T10:00:00-08:00"),
-        ]
-        ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
-        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
-        assert [r["us_accession_number"] for r in kept] == ["U1"]
-
-    @pytest.mark.parametrize("strategy", ["closest", "most_images"])
     @pytest.mark.parametrize("all_pairs", [False, True])
-    def test_no_ct_is_dropped(self, strategy, all_pairs):
+    def test_no_ct_is_dropped(self, all_pairs):
         # Ranking within the group, rather than filtering on is_closest_us,
         # is what guarantees every emitted CT keeps exactly one row.
         us = [
@@ -459,20 +432,20 @@ class TestSelectOneUsPerCt:
             exam("A1", "C2", "2021-03-02T14:00:00-08:00"),
         ]
         matches = match_exams(us, ct, all_pairs=all_pairs)
-        kept, _ = select_one_us_per_ct(matches, strategy)
+        kept = select_one_us_per_ct(matches, "closest")
         before = {m["ct_accession_number"] for m in matches}
         assert {r["ct_accession_number"] for r in kept} == before
         assert len(kept) == len(before)
 
     def test_one_row_survives_per_ct(self):
-        kept, _ = select_one_us_per_ct(self._two_us_one_ct(), "closest")
+        kept = select_one_us_per_ct(self._two_us_one_ct(), "closest")
         assert len(kept) == 1
 
     def test_untouched_when_nothing_is_contested(self):
         us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00", image_count="14")]
         ct = [exam("A1", "C1", "2021-03-02T14:00:00-08:00")]
         matches = match_exams(us, ct)
-        kept, _ = select_one_us_per_ct(matches, "most_images")
+        kept = select_one_us_per_ct(matches, "closest")
         assert kept == matches
 
     def test_patients_are_kept_apart(self):
@@ -485,7 +458,7 @@ class TestSelectOneUsPerCt:
             exam("A1", "C1", "2021-03-02T14:00:00-08:00"),
             exam("A2", "C1", "2021-03-02T14:00:00-08:00"),
         ]
-        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
+        kept = select_one_us_per_ct(match_exams(us, ct), "closest")
         assert len(kept) == 2
 
     def test_preserves_original_row_order(self):
@@ -498,8 +471,10 @@ class TestSelectOneUsPerCt:
             exam("A1", "C1", "2021-03-02T14:00:00-08:00"),
             exam("A2", "C2", "2021-03-02T14:00:00-08:00"),
         ]
-        kept, _ = select_one_us_per_ct(match_exams(us, ct), "most_images")
-        assert [r["us_accession_number"] for r in kept] == ["U1", "U3"]
+        # A1 keeps U2 as the nearer of its two; A2's U3 is unopposed. Both
+        # survivors come back in the order match_exams emitted them.
+        kept = select_one_us_per_ct(match_exams(us, ct), "closest")
+        assert [r["us_accession_number"] for r in kept] == ["U2", "U3"]
 
     def test_rejects_an_unknown_strategy(self):
         with pytest.raises(ValueError, match="Unknown us_selection"):

@@ -108,7 +108,6 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run list-projects` | `air_download -lpj` | List available project IDs |
 | `pixi run list-profiles` | `air_download -lpf` | List available anonymization profiles |
 | `pixi run match` | `air_match` | Match ultrasound exams to the CTs that followed |
-| `pixi run probe` | `air_probe` | List the series inside candidate exams without downloading them |
 | `pixi run download-cohort` | `air_cohort` | Download a matched cohort into per-patient visit folders |
 | `pixi run frames` | `air_frames` | Count frames in downloaded DICOMs, and prune to the multi-frame clips |
 | `pixi run test` | `pytest` | Run the test suite |
@@ -275,8 +274,6 @@ INFO: Thinnest axial series: 'AXIAL 0.625MM BONE' (0.625mm, 480 images).
 INFO: Series selection: from 6 to 1 (thinnest axial).
 ```
 
-Better still, preview the choice across a whole cohort without downloading anything — see [`--select thinnest_axial`](#inspecting-an-exams-series-without-downloading-it).
-
 `--thinnest-axial` runs after `-s` and `-s-exclude`, so those can pre-trim the candidates.
 
 ### Building a cohort, then downloading it
@@ -417,29 +414,15 @@ us_rank_before_ct to decide case by case.
 
 | Value | Keeps |
 | --- | --- |
-| `all` (default) | Every candidate — today's behaviour, nothing dropped |
+| `all` (default) | Every candidate — nothing dropped |
 | `closest` | The ultrasound nearest the CT (equivalent to filtering `is_closest_us`) |
-| `most_images` | The ultrasound with the largest `us_image_count` |
 
 ```bash
 pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
-               --us_selection most_images
+               --us_selection closest
 ```
 
-Use `most_images` when the ultrasound you want is **not** necessarily the latest one — a full FAST stores many more objects than a single-view IVC or vascular-access scan, so the count discriminates where timing does not:
-
-```
-# --us_selection closest       -> keeps US-B, the 2-object IVC scan
-# --us_selection most_images   -> keeps US-A, the 22-object FAST
-Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,CT-A,...,6.0,2,1,False
-Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,CT-A,...,4.0,2,2,True
-```
-
-It is a heuristic over object counts, in the same class as `--thinnest-axial`. When no candidate for a CT states an `image_count`, that CT falls back to `closest` and the run says how many did so.
-
-> **Know what this counts.** `image_count` counts DICOM *objects* — captures — not frames. Where ultrasounds are stored as cine clips, a 6-clip FAST reports `6` while a study saved as 20 stills reports `20`, and `most_images` would pick the wrong one. It discriminates by number of views, which is only a proxy for "a full FAST" when the exams are stored the same way. Check that assumption on your own data before trusting it: [`pixi run frames`](#counting-frames-and-keeping-only-the-real-cine-clips) gives the actual frame counts, though only after downloading.
-
-To see what each exam holds before choosing, use [`pixi run probe`](#inspecting-an-exams-series-without-downloading-it) — bearing the same caveat in mind, since probe reports the same object counts.
+**Timing is the only signal available at this stage.** Ranking on `us_image_count` was tried and removed: `image_count` counts DICOM *objects*, not frames, so a single-view study saved as twenty stills outranks a four-clip FAST. If the ultrasound you want is not the one nearest the CT, the honest answer is that the API cannot tell you which it is — settle it with real frame counts from [`pixi run frames`](#counting-frames-and-keeping-only-the-real-cine-clips) after downloading, then filter the matched CSV yourself.
 
 Alternatively, filter afterwards on `is_closest_us`:
 
@@ -504,68 +487,6 @@ with open('matched_ct_only.csv','w',newline='') as f:
 "
 pixi run download --accessions-csv matched_ct_only.csv -o matched_ct_dicom/ --thinnest-axial
 ```
-
-### Inspecting an exam's series without downloading it
-
-When a description and a timestamp are not enough to tell you which exam you want, `pixi run probe` lists what each one actually contains. It issues two plain queries per exam and transfers no image data — `/secure/search/series` sits outside the download handshake — so it needs no project or anonymization profile and creates no archives:
-
-```bash
-# One row per exam: series count, total objects, and the series descriptions
-pixi run probe --input_csv matched_us_ct.csv --summary \
-               --output probe_us.csv --cred_path ~/air_login.txt
-```
-
-```
-mrn,accession_number,date_time,description,study_image_count,n_series,total_series_image_count,series_descriptions
-Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,6,22,RUQ | LUQ | SUPRAPUBIC | SUBXIPHOID | RUQ REPEAT | CINE
-Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,1,2,IVC
-```
-
-Drop `--summary` for one row per series, adding `series_number`, `series_description`, `series_modality`, `series_image_count`, and `series_uid`.
-
-It accepts either CSV this tool writes, told apart by their header:
-
-- a **matched CSV** from `pixi run match` — one accession column per paired modality
-- a **search-result** `accessions.csv` — an unprefixed `accession_number`, every row probed
-
-A matched CSV declares its modalities in its header, as `<modality>_accession_number`, so nothing about ultrasound or CT is baked in — a pairing of `mr_accession_number` and `xr_accession_number` works the same way. `--modalities` selects among whatever the file declares, and defaults to `all`:
-
-```bash
-pixi run probe --input_csv matched_us_ct.csv                          # us and ct
-pixi run probe --input_csv matched_us_ct.csv --modalities ct --n 2    # just the CTs
-pixi run probe --input_csv matched_us_ct_mr.csv --modalities us,mr    # two of three
-```
-
-Asking for a modality the file does not pair fails immediately, naming the ones it does. On a search-result CSV there are no modalities to choose between, so `--modalities` is ignored with a warning rather than silently.
-
-##### Previewing what `--thinnest-axial` would keep
-
-By default probe reports every series, which is not the same as what a download would fetch. `--select thinnest_axial` runs the same selection the downloader uses and **marks** the rows rather than dropping them, so you can still see what was passed over:
-
-```bash
-pixi run probe --input_csv matched_us_ct.csv --modalities ct \
-               --select thinnest_axial --cred_path ~/air_login.txt
-```
-
-```
-CT-A   CT SCOUT                   2
-CT-A   CT AXIAL 5MM STD          60
-CT-A   CT AXIAL 0.625MM BONE    480  <== selected
-CT-A   CT COR 3MM MPR            90
-CT-A   SR Dose Report             1
-```
-
-With `--summary` each exam instead gains `selected_description` and `selected_image_count`, which is what you sort on to find exams where the heuristic picked something surprising:
-
-```
-CT-A   n_series=5 total=633 selected=AXIAL 0.625MM BONE  selected_count=480
-```
-
-Note `total_series_image_count` (633) counts what *exists*; `selected_image_count` (480) counts what you would actually retrieve. `--axial-patterns` works here exactly as it does on the downloader, so you can test a widened pattern set before committing to it. An exam with no matching axial series gets a blank selection — expected for anything that is not a CT — and the run warns with a count.
-
-The counts and descriptions it reports are the whole of what the API exposes per series — see [What the API reports per series](#what-the-api-reports-per-series). Treat them as evidence, not ground truth.
-
-An exam that fails is counted and the run continues; the output is overwritten rather than appended to, so re-running after a failure does not double the rows.
 
 ### Counting frames, and keeping only the real cine clips
 

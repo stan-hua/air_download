@@ -18,7 +18,7 @@ pixi run download -h           # CLI entry point (air_download.cli:cli)
 pixi add <pkg>                 # conda dep; --pypi only if unavailable on conda-forge
 ```
 
-Tasks mirror the workflows in README.md — `download`, `search`, `list-projects`, `list-profiles`, `match`, `probe`, `download-cohort`, `test`. They are thin wrappers over `air_download` with a flag pre-applied, and pixi appends trailing arguments, so keep them in sync when CLI flags change.
+Tasks mirror the workflows in README.md — `download`, `search`, `list-projects`, `list-profiles`, `match`, `download-cohort`, `frames`, `test`. They are thin wrappers over `air_download` with a flag pre-applied, and pixi appends trailing arguments, so keep them in sync when CLI flags change.
 
 The package is installed editable into the environment, so source edits need no reinstall. `pixi.lock` is committed; `.pixi/` is not.
 
@@ -32,10 +32,10 @@ Request flow for every operation is: `cli.py` parses args → constructs `AIRCli
 - **`filters.py`** — `apply_inclusion_filter` / `apply_exclusion_filter`. Both take a comma-separated pattern string and do case-insensitive substring matching with OR logic over one dict field. They are applied to *exams* (on `modality` / `description`) inside `search()`, and to *series* (on `description`) inside `_download_single_exam`. Inclusion runs before exclusion. Also holds the `--thinnest-axial` series selection (see below).
 - **`utils.py`** — `build_exam_output_path` (directory vs. `.zip` path disambiguation, index suffix to avoid overwriting) and `write_exams_csv` (appends to `<output>/accessions.csv`, header written only when the file is new).
 - **`cli.py`** — arg parsing, logging setup, table printing. `_configure_logging` deliberately only touches the `air_download` logger so `urllib3`/`requests` stay quiet.
-- **`us_ct/`** — the subpackage holding everything that assumes an ultrasound→CT pairing specifically. The boundary is the point: a module belongs here if it names `us`/`ct` in its flags, columns, or output layout, and outside it if it generalises. `probe.py` is deliberately outside, since it reads a pairing's modalities off the CSV header. Don't add general-purpose code here, and don't teach these two modules a third modality — a general matcher would be a new module, not a widening of these.
+- **`us_ct/`** — the subpackage holding everything that assumes an ultrasound→CT pairing specifically. The boundary is the point: a module belongs here if it names `us`/`ct` in its flags, columns, or output layout, and outside it if it generalises. `frames.py` is deliberately outside, since frame counting applies to any downloaded DICOM. Don't add general-purpose code here, and don't teach these two modules a third modality — a general matcher would be a new module, not a widening of these.
   - **`us_ct/match.py`** — cohort building, not API access: pairs two search-result CSVs into ultrasound→CT matches. Its own `air_match` entry point, and the first module written to the **Conventions** below (`fire.Fire()`, NumPy docstrings, grouped imports), since it was added after they were set. New modules should follow it rather than the older files.
   - **`us_ct/cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/<mrn>/<MM-DD-YY>/{us,ct}/`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions**, like `match.py`.
-- **`probe.py`** — lists an exam's series without downloading it, for any matched pairing or a plain search CSV. Own `air_probe` entry point.
+- **`frames.py`** — counts frames in downloaded DICOM files and prunes by them. Own `air_frames` entry point. The only module that reads local files rather than the API.
 - **`air_download/air_download.py`** — backward-compat shim re-exporting the public names. Add new code to the focused modules, not here.
 
 ### Download protocol quirks
@@ -76,7 +76,7 @@ Details worth preserving: axial patterns match as **whole words** (`\b…\b`) sp
 
 Selection runs *after* `-s`/`-s-exclude` in `_download_single_exam`, and returns **empty** (with a warning naming the consequence) rather than everything when no axial matches — silently downloading a whole study would be worse than downloading nothing. Empty means `_download_single_exam` writes no archive, which `cohort.py` then counts as a failed exam; that chain is intentional, so a miss is visible rather than silent.
 
-`keep_thinnest_axial` is the public entry point (returns a list); `select_thinnest_axial` is the picker (returns one series or None) and is what `probe.py` calls, since the picker stays quiet when nothing qualifies and the wrapper warns.
+`keep_thinnest_axial` is the public entry point (returns a list); `select_thinnest_axial` is the picker (returns one series or None), kept separate so a caller that only wants the decision does not trigger the wrapper's warning.
 
 ### Bulk input (`--accessions-csv`)
 
@@ -92,19 +92,7 @@ Default keeps the earliest qualifying CT per ultrasound; `--all_pairs` emits all
 
 `us_image_count` / `ct_image_count` are carried through from the `image_count` column of the search CSV via `.get(..., "")`, so a CSV predating that column still matches — don't promote it into `_REQUIRED_COLUMNS`.
 
-`select_one_us_per_ct` (`--us_selection`) is a pure post-filter over emitted rows, deliberately *not* folded into `match_exams`, which stays untouched along with the tests pinning it. `closest` takes the highest `us_rank_before_ct` within each `(mrn, ct_accession_number)` group rather than filtering `is_closest_us == True`: that flag is computed over every ultrasound the patient has, so filtering on it couples the result to an invariant this function doesn't control, while taking the max rank guarantees exactly one survivor per CT unconditionally. `most_images` exists because the wanted ultrasound is often *not* the latest one — a full FAST holds far more objects than a single-view IVC scan. A group where no row states a count falls back to `closest` and is counted for a warning.
-
-### Series inspection (`probe.py`)
-
-Lists what an exam contains without downloading it. `AIRClient.list_series` is the extracted `secure/search/series` call — a plain `Query`-tagged endpoint that sits **outside** the download handshake, so it queues no retrieval and needs no project or profile. `_download_single_exam` calls the same method; keep them sharing it.
-
-**`imageCount` counts DICOM objects, not frames.** A multi-frame ultrasound cine clip counts once however long it runs. The API exposes no `NumberOfFrames`, no slice thickness, no plane, no body part, and no protocol name — the whole per-series surface is `description`, `imageCount`, `modality`, `seriesNumber`, `seriesUid`. Don't describe a count as a frame count, and don't propose a query for anything else in that list; it does not exist.
-
-`read_exam_pairs` dispatches on the CSV header. `matched_modalities` reads the pairing's modalities off it via `^(.+)_accession_number$`, so **nothing about US/CT is hard-coded** — any pairing works, and `--modalities` selects among what the file declares. An unprefixed `accession_number` deliberately fails that regex, which is exactly what distinguishes a search-result CSV; that branch delegates to `utils.read_accession_pairs`. Don't reintroduce a fixed column list.
-
-It cannot reuse `us_ct/cohort.py`'s `read_matched_pairs`, whose `REQUIRED_COLUMNS` fixes the us/ct shape; the matched branch parses rows itself but keeps the same rules — MRN and accession required together, blanks skipped and counted, duplicate pairs collapsed (which matters because `--search-only` appends). Output is overwritten, like `match.py` and unlike `write_exams_csv`.
-
-`--select thinnest_axial` previews what the downloader would keep, and **marks rows rather than dropping them** — the point is to see what was passed over, so don't "simplify" it into a filter. Header columns are added conditionally via `probe_csv_header`, so a run without `--select` has no misleading empty column. A summary row's `selected_image_count` is blank, never `0`, when nothing qualifies: "no axial series" must not read as "an axial series holding no images".
+`select_one_us_per_ct` (`--us_selection`) is a pure post-filter over emitted rows, deliberately *not* folded into `match_exams`, which stays untouched along with the tests pinning it. `closest` takes the highest `us_rank_before_ct` within each `(mrn, ct_accession_number)` group rather than filtering `is_closest_us == True`: that flag is computed over every ultrasound the patient has, so filtering on it couples the result to an invariant this function doesn't control, while taking the max rank guarantees exactly one survivor per CT unconditionally. A `most_images` strategy ranking on `us_image_count` existed and was removed: that counts DICOM objects, not frames, so a single-view study saved as many stills outranks a multi-clip FAST. Don't reintroduce it — frame counts are the only honest signal and they exist only after downloading (`frames.py`). The `us_image_count` / `ct_image_count` columns stay as raw data, but nothing selects on them.
 
 ### Frame counting (`frames.py`)
 

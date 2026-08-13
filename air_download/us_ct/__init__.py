@@ -7,6 +7,6 @@ its output columns ``us_*`` / ``ct_*``, and ``cohort`` lays exams out under
 the thinnest axial series of the CT.
 
 Anything that generalises past that pairing belongs outside this package --
-``air_download.probe``, for instance, reads a pairing's modalities off the
-CSV header and works for any of them.
+``air_download.frames``, for instance, counts frames in any downloaded DICOM
+whatever its modality.
 """

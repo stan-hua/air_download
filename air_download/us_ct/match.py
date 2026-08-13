@@ -21,11 +21,10 @@ Widen the window and keep every qualifying CT per ultrasound::
     pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
                    --max_hours 48 --all_pairs --output matched_48h.csv
 
-Where several ultrasounds precede one CT, keep only the one holding the most
-DICOM objects rather than the one nearest in time::
+Where several ultrasounds precede one CT, keep only the one nearest it::
 
     pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
-                   --us_selection most_images
+                   --us_selection closest
 """
 
 # Standard libraries
@@ -48,7 +47,7 @@ DEFAULT_MAX_HOURS = 24.0
 
 # How to pick one ultrasound when several precede the same CT. "all" keeps
 # every candidate, which is the historical behaviour.
-US_SELECTION_STRATEGIES = ("all", "closest", "most_images")
+US_SELECTION_STRATEGIES = ("all", "closest")
 DEFAULT_US_SELECTION = "all"
 
 MATCH_CSV_HEADER = [
@@ -233,18 +232,10 @@ def match_exams(
     return matches
 
 
-def _us_image_count(row: dict[str, Any]) -> int | None:
-    """Return a row's ultrasound image count, or None when it states none."""
-    try:
-        return int(str(row.get("us_image_count", "")).strip())
-    except (TypeError, ValueError):
-        return None
-
-
 def select_one_us_per_ct(
     matches: list[dict[str, Any]],
     strategy: str = DEFAULT_US_SELECTION,
-) -> tuple[list[dict[str, Any]], int]:
+) -> list[dict[str, Any]]:
     """Reduce each CT to a single ultrasound, by the requested strategy.
 
     ``match_exams`` is driven by ultrasounds, so a CT preceded by several of
@@ -256,10 +247,11 @@ def select_one_us_per_ct(
     result to an invariant this function does not control; taking the highest
     rank present guarantees exactly one survivor per CT regardless.
 
-    ``most_images`` prefers the ultrasound holding the most DICOM objects, on
-    the assumption that a multi-view FAST stores more than a single-view
-    bedside scan. It is a heuristic over ``image_count``, which counts objects
-    and not frames, so a cine clip counts once however long it runs.
+    Timing is the only signal available here. Ranking on ``image_count`` was
+    tried and removed: it counts DICOM objects rather than frames, so a
+    single-view study saved as many stills outranks a multi-clip FAST. Frame
+    counts settle that, and they exist only after downloading -- see
+    ``air_frames``.
 
     Parameters
     ----------
@@ -271,9 +263,8 @@ def select_one_us_per_ct(
 
     Returns
     -------
-    tuple
-        The kept rows, in their original order, and the number of groups that
-        stated no usable image count and so fell back to ``closest``.
+    list of dict
+        The kept rows, in their original order.
 
     Raises
     ------
@@ -286,36 +277,17 @@ def select_one_us_per_ct(
             f"{', '.join(US_SELECTION_STRATEGIES)}."
         )
     if strategy == "all":
-        return matches, 0
+        return matches
 
     groups: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for index, row in enumerate(matches):
         groups[(row["mrn"], row["ct_accession_number"])].append((index, row))
 
-    keep: set[int] = set()
-    without_counts = 0
-    for group in groups.values():
-        chosen = None
-        if strategy == "most_images":
-            counted = [
-                (count, index, row)
-                for index, row in group
-                if (count := _us_image_count(row)) is not None
-            ]
-            if counted:
-                # Most objects wins; a tie goes to the ultrasound nearer the CT.
-                chosen = max(
-                    counted, key=lambda item: (item[0], item[2]["us_rank_before_ct"])
-                )[1]
-            else:
-                without_counts += 1
-        if chosen is None:
-            # "closest", and where no row in the group stated an image count.
-            chosen = max(group, key=lambda item: item[1]["us_rank_before_ct"])[0]
-        keep.add(chosen)
-
-    kept = [row for index, row in enumerate(matches) if index in keep]
-    return kept, without_counts
+    keep = {
+        max(group, key=lambda item: item[1]["us_rank_before_ct"])[0]
+        for group in groups.values()
+    }
+    return [row for index, row in enumerate(matches) if index in keep]
 
 
 def count_ambiguous_cts(matches: list[dict[str, Any]]) -> int:
@@ -392,7 +364,7 @@ def match(
     us_selection : str, optional
         How to resolve a CT preceded by several ultrasounds: ``all`` (the
         default) keeps every candidate, ``closest`` keeps the one nearest the
-        CT, ``most_images`` keeps the one with the largest ``image_count``.
+        CT.
     verbose : bool, optional
         Log at DEBUG level.
     """
@@ -415,7 +387,7 @@ def match(
     # Measured before narrowing, so the report describes the data rather than
     # whatever the strategy happened to keep.
     ambiguous = count_ambiguous_cts(matches)
-    selected, without_counts = select_one_us_per_ct(matches, us_selection)
+    selected = select_one_us_per_ct(matches, us_selection)
     dropped = len(matches) - len(selected)
 
     written = write_matches_csv(selected, Path(output))
@@ -438,13 +410,6 @@ def match(
             us_selection,
             dropped,
             len(matches),
-        )
-    if without_counts:
-        logger.warning(
-            "%d CT exam(s) had no ultrasound stating an image_count, so the "
-            "one nearest the CT was kept instead. Re-run the search to "
-            "populate image_count, or use air_probe to inspect their series.",
-            without_counts,
         )
     if ambiguous and us_selection == "all":
         logger.warning(
