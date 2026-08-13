@@ -244,3 +244,64 @@ class TestWriteExamsCsv:
 
         # csv module should properly quote the description
         assert rows[1][5] == "BRAIN, WITH CONTRAST, AXIAL"
+
+
+class TestAsIdentifier:
+    """Identifiers stay text, because a leading zero is part of them."""
+
+    def test_leading_zeros_survive(self):
+        from air_download.utils import as_identifier
+
+        assert as_identifier("00123456") == "00123456"
+
+    def test_none_becomes_empty(self):
+        from air_download.utils import as_identifier
+
+        assert as_identifier(None) == ""
+
+    def test_an_integer_is_stringified(self):
+        from air_download.utils import as_identifier
+
+        assert as_identifier(123456) == "123456"
+
+    def test_a_whole_float_does_not_keep_its_point_zero(self):
+        from air_download.utils import as_identifier
+
+        assert as_identifier(123456.0) == "123456"
+
+
+class TestIdentifiersAreNotNumbers:
+    """A leading-zero MRN must survive the write/read round trip."""
+
+    def test_write_exams_csv_keeps_leading_zeros(self, tmp_path):
+        from air_download.utils import write_exams_csv
+
+        exams = [{"accessionNumber": "0099", "dateTime": "2021-03-02"}]
+        out = write_exams_csv(exams, tmp_path, mrn="00123456")
+        text = out.read_text()
+        assert "00123456,0099," in text
+
+    def test_patient_id_fallback_keeps_leading_zeros(self, tmp_path):
+        from air_download.utils import write_exams_csv
+
+        exams = [{"accessionNumber": "0099", "patientId": "00123456"}]
+        out = write_exams_csv(exams, tmp_path)
+        assert "00123456,0099," in out.read_text()
+
+    def test_a_numeric_patient_id_is_written_as_text(self, tmp_path):
+        from air_download.utils import write_exams_csv
+
+        # Defensive: JSON cannot encode a leading zero as a number, but a
+        # data source returning a bare integer must not become "123456.0".
+        exams = [{"accessionNumber": 99, "patientId": 123456}]
+        out = write_exams_csv(exams, tmp_path)
+        assert "123456,99," in out.read_text()
+
+    def test_read_accession_pairs_keeps_leading_zeros(self, tmp_path):
+        from air_download.utils import read_accession_pairs
+
+        path = tmp_path / "accessions.csv"
+        path.write_text(
+            "mrn,accession_number\n00123456,0099\n"
+        )
+        assert read_accession_pairs(path) == [("00123456", "0099")]

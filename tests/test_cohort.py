@@ -381,3 +381,31 @@ class TestDownloadCohort:
         csv_path = write_csv(tmp_path / "m.csv", [["", "U1", "2021-03-02", "C1"]])
         download_cohort(matched_csv=csv_path, output=tmp_path / "out")
         assert stub_client.instances == []
+
+
+class TestLeadingZeroMrn:
+    """The visit folder must keep an MRN's leading zero."""
+
+    def test_folder_name_keeps_leading_zeros(self, tmp_path):
+        us_path, ct_path = build_visit_paths(tmp_path, row(mrn="00123456"))
+        assert us_path.parts[-4] == "00123456"
+        assert ct_path.parts[-4] == "00123456"
+
+    def test_read_matched_pairs_keeps_leading_zeros(self, tmp_path):
+        path = write_csv(
+            tmp_path / "matched.csv",
+            [["00123456", "0099", "2021-03-02T06:00:00-08:00", "0100"]],
+        )
+        (parsed,) = read_matched_pairs(path)
+        assert parsed["mrn"] == "00123456"
+        assert parsed["us_accession_number"] == "0099"
+
+    def test_two_mrns_differing_only_by_a_leading_zero_get_separate_folders(
+        self, tmp_path
+    ):
+        claimed = {}
+        first, _ = build_visit_paths(tmp_path, row(mrn="0123"), claimed)
+        second, _ = build_visit_paths(tmp_path, row(mrn="123"), claimed)
+        assert first.parts[-4] == "0123"
+        assert second.parts[-4] == "123"
+        assert first != second

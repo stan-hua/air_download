@@ -136,6 +136,12 @@ The loop returns or raises on its final pass, which keeps two existing behaviors
 
 `.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip`. Keep it that way.
 
+## Identifiers are text, never numbers
+
+MRNs and accession numbers look numeric but are not: a leading zero is part of the identifier, and dropping it names a **different patient**. Everything here reads and writes them as strings — `csv` does that by default, and `as_identifier` (in `utils.py`) coerces anything the API might return typed as a number. Tests in `test_utils.py`, `test_match.py`, and `test_cohort.py` pin `00123456` end to end; keep them.
+
+Never introduce `int()`, `pandas.read_csv` without `dtype=str`, or an argparse `type=int` on any identifier path. When a user reports lost leading zeros, check outside this package first — `pandas.read_csv` and Excel both coerce on read, and Excel also on save — but verify rather than assume, since the failure silently selects the wrong patient.
+
 Arguments and outputs are patient identifiers (MRN, accession numbers) and DICOM images. Never write real accession numbers, MRNs, or credential-file contents into the repo, test fixtures, logs, or commit messages. Tests use synthetic values and `tmp_path`.
 
 ## Known drift

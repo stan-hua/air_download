@@ -504,3 +504,46 @@ class TestEndToEnd:
         )
         matches = match_exams(read_exams(us_csv), read_exams(ct_csv))
         assert [m["mrn"] for m in matches] == ["A1"]
+
+
+class TestLeadingZeroMrn:
+    """An MRN is text: a leading zero identifies a different patient."""
+
+    def test_survives_read_and_match(self, tmp_path):
+        us_csv = write_csv(
+            tmp_path, "us.csv", "00123456,US-A,2021-03-02T08:00:00-08:00,,,US,7"
+        )
+        ct_csv = write_csv(
+            tmp_path, "ct.csv", "00123456,CT-A,2021-03-02T14:00:00-08:00,,,CT,480"
+        )
+        (row,) = match_exams(read_exams(us_csv), read_exams(ct_csv))
+        assert row["mrn"] == "00123456"
+
+    def test_survives_the_written_csv(self, tmp_path):
+        us_csv = write_csv(
+            tmp_path, "us.csv", "00123456,0099,2021-03-02T08:00:00-08:00,,,US,7"
+        )
+        ct_csv = write_csv(
+            tmp_path, "ct.csv", "00123456,0100,2021-03-02T14:00:00-08:00,,,CT,480"
+        )
+        out = write_matches_csv(
+            match_exams(read_exams(us_csv), read_exams(ct_csv)),
+            tmp_path / "matched.csv",
+        )
+        assert out.read_text().splitlines()[1].startswith("00123456,0099,")
+
+    def test_two_mrns_differing_only_by_a_leading_zero_stay_apart(self):
+        # 0123 and 123 are different patients; a numeric cast would merge them.
+        us = [
+            exam("0123", "U1", "2021-03-02T08:00:00-08:00"),
+            exam("123", "U2", "2021-03-02T08:00:00-08:00"),
+        ]
+        ct = [
+            exam("0123", "C1", "2021-03-02T14:00:00-08:00"),
+            exam("123", "C2", "2021-03-02T14:00:00-08:00"),
+        ]
+        matches = match_exams(us, ct)
+        assert {(m["mrn"], m["ct_accession_number"]) for m in matches} == {
+            ("0123", "C1"),
+            ("123", "C2"),
+        }

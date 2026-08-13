@@ -49,6 +49,29 @@ def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
     pkg_logger.addHandler(handler)
 
 
+def as_identifier(value: Any) -> str:
+    """Return a patient or exam identifier as text.
+
+    MRNs and accession numbers look numeric but are not numbers: a leading
+    zero is part of the identifier, and dropping it points at a different
+    patient. This keeps them as strings wherever one might arrive typed as a
+    number, so nothing downstream has to guess.
+
+    Args:
+        value: The identifier, possibly None or already a string.
+
+    Returns:
+        The identifier as a string, or an empty string when it is absent.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        # A JSON number that arrived as a float would otherwise stringify
+        # as "1234.0".
+        return str(int(value))
+    return str(value)
+
+
 def parse_datetime(value: str) -> datetime:
     """Parse a user-supplied date or datetime into a timezone-aware value.
 
@@ -240,8 +263,11 @@ def write_exams_csv(
         for exam in exams:
             writer.writerow(
                 [
-                    mrn or exam.get("patientId", ""),
-                    exam.get("accessionNumber", ""),
+                    # Identifiers are written as text, never as numbers: an MRN
+                    # or accession number can carry leading zeros that identify
+                    # the patient, and losing them silently picks the wrong one.
+                    as_identifier(mrn or exam.get("patientId")),
+                    as_identifier(exam.get("accessionNumber")),
                     exam.get("dateTime", ""),
                     exam.get("sex", ""),
                     exam.get("birthdate", ""),

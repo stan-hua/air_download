@@ -297,6 +297,16 @@ Note that `--search-only` **appends** to `accessions.csv` if one is already ther
 
 > **These CSVs contain PHI** — MRNs, accession numbers, and birthdates. `.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip` so they cannot be committed by accident. Keep search output out of the repository, and check `git status` before staging.
 
+> **MRNs and accession numbers are text, not numbers.** They are written and read as strings at every step here, so a leading zero survives — `00123456` stays `00123456` through the search CSV, the matched CSV, and the cohort folder names. **Anything else that opens these files can still destroy them.** `pandas.read_csv` infers `00123456` as the integer `123456`, and Excel does the same on open *and on save*, silently pointing you at a different patient. Read them as text:
+>
+> ```python
+> # pandas: force the identifier columns to stay strings
+> df = pd.read_csv("matched_us_ct.csv", dtype=str)
+> df = pd.read_csv("accessions.csv", dtype={"mrn": str, "accession_number": str})
+> ```
+>
+> In Excel, use Data ▸ From Text/CSV and set those columns to *Text* rather than double-clicking the file. If a CSV has already been through Excel, the zeros are gone from the file — re-export it from the original search rather than trying to pad them back, since you cannot tell how many digits were lost.
+
 #### Downloading from the CSV
 
 Feed the CSV straight back in with `--accessions-csv`:
