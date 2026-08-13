@@ -18,7 +18,7 @@ pixi run download -h           # CLI entry point (air_download.cli:cli)
 pixi add <pkg>                 # conda dep; --pypi only if unavailable on conda-forge
 ```
 
-Tasks mirror the workflows in README.md — `download`, `search`, `list-projects`, `list-profiles`, `test`. They are thin wrappers over `air_download` with a flag pre-applied, and pixi appends trailing arguments, so keep them in sync when CLI flags change.
+Tasks mirror the workflows in README.md — `download`, `search`, `list-projects`, `list-profiles`, `match`, `probe`, `download-cohort`, `test`. They are thin wrappers over `air_download` with a flag pre-applied, and pixi appends trailing arguments, so keep them in sync when CLI flags change.
 
 The package is installed editable into the environment, so source edits need no reinstall. `pixi.lock` is committed; `.pixi/` is not.
 
@@ -85,6 +85,18 @@ Rows missing either field are skipped with a warning rather than queried on a pa
 Three rules define a qualifying pair, and each has a test pinning it: same patient **by MRN** (never by accession, which repeats across patients), CT **strictly after** the ultrasound (equal timestamps do not qualify — neither followed the other), and within `max_hours` **inclusive** at the boundary. Comparisons use timezone-aware datetimes so mixed offsets and midnight crossings are correct; don't reduce them to naive dates.
 
 Default keeps the earliest qualifying CT per ultrasound; `--all_pairs` emits all. Output is overwritten rather than appended, deliberately unlike `write_exams_csv`. Log counts only — never MRNs or accession numbers.
+
+`us_image_count` / `ct_image_count` are carried through from the `image_count` column of the search CSV via `.get(..., "")`, so a CSV predating that column still matches — don't promote it into `_REQUIRED_COLUMNS`.
+
+`select_one_us_per_ct` (`--us_selection`) is a pure post-filter over emitted rows, deliberately *not* folded into `match_exams`, which stays untouched along with the tests pinning it. `closest` takes the highest `us_rank_before_ct` within each `(mrn, ct_accession_number)` group rather than filtering `is_closest_us == True`: that flag is computed over every ultrasound the patient has, so filtering on it couples the result to an invariant this function doesn't control, while taking the max rank guarantees exactly one survivor per CT unconditionally. `most_images` exists because the wanted ultrasound is often *not* the latest one — a full FAST holds far more objects than a single-view IVC scan. A group where no row states a count falls back to `closest` and is counted for a warning.
+
+### Series inspection (`probe.py`)
+
+Lists what an exam contains without downloading it. `AIRClient.list_series` is the extracted `secure/search/series` call — a plain `Query`-tagged endpoint that sits **outside** the download handshake, so it queues no retrieval and needs no project or profile. `_download_single_exam` calls the same method; keep them sharing it.
+
+**`imageCount` counts DICOM objects, not frames.** A multi-frame ultrasound cine clip counts once however long it runs. The API exposes no `NumberOfFrames`, no slice thickness, no plane, no body part, and no protocol name — the whole per-series surface is `description`, `imageCount`, `modality`, `seriesNumber`, `seriesUid`. Don't describe a count as a frame count, and don't propose a query for anything else in that list; it does not exist.
+
+`read_exam_pairs` dispatches on the CSV header (`us_accession_number` present ⇒ matched CSV) and reuses `cohort.read_matched_pairs` / `utils.read_accession_pairs` rather than parsing again, which is what keeps the (MRN, accession) pairing requirement intact. Output is overwritten, like `match.py` and unlike `write_exams_csv`.
 
 ### Cohort download layout (`cohort.py`)
 

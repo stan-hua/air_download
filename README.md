@@ -108,6 +108,7 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run list-projects` | `air_download -lpj` | List available project IDs |
 | `pixi run list-profiles` | `air_download -lpf` | List available anonymization profiles |
 | `pixi run match` | `air_match` | Match ultrasound exams to the CTs that followed |
+| `pixi run probe` | `air_probe` | List the series inside candidate exams without downloading them |
 | `pixi run download-cohort` | `air_cohort` | Download a matched cohort into per-patient visit folders |
 | `pixi run test` | `pytest` | Run the test suite |
 
@@ -291,12 +292,14 @@ A pair qualifies when all three hold:
 Output is one row per matched ultrasound:
 
 ```
-mrn,us_accession_number,us_date_time,us_description,ct_accession_number,ct_date_time,ct_description,hours_between
-A1,U1,2021-03-02T08:00:00-08:00,US ED BEDSIDE,C1,2021-03-02T14:00:00-08:00,CT ABDOMEN PELVIS W CONTRAST,6.0
-A4,U4,2021-04-01T22:00:00-07:00,US ED BEDSIDE,C4,2021-04-02T03:00:00-07:00,CT ABDOMEN PELVIS W CONTRAST,5.0
+mrn,us_accession_number,us_date_time,us_description,us_image_count,ct_accession_number,ct_date_time,ct_description,ct_image_count,hours_between
+A1,U1,2021-03-02T08:00:00-08:00,US ED BEDSIDE,22,C1,2021-03-02T14:00:00-08:00,CT ABDOMEN PELVIS W CONTRAST,480,6.0
+A4,U4,2021-04-01T22:00:00-07:00,US ED BEDSIDE,18,C4,2021-04-02T03:00:00-07:00,CT ABDOMEN PELVIS W CONTRAST,512,5.0
 ```
 
 `hours_between` is there so you can sanity-check the window and tighten it afterwards without re-running.
+
+`us_image_count` and `ct_image_count` are carried straight through from the `image_count` column of the search results. They count **DICOM objects, not frames** — an ultrasound cine clip counts once however long it runs — but they still separate a multi-view FAST from a single-view bedside scan. An older `accessions.csv` written before that column existed still matches; the two columns come out empty.
 
 When a patient has **several qualifying CTs**, the default keeps the **earliest** one — the CT that actually followed the ultrasound. `--all_pairs` emits every qualifying CT instead:
 
@@ -327,11 +330,35 @@ A run also warns when it happens at all:
 ```
 WARNING: 1 CT exam(s) had more than one ultrasound before them inside the window,
 so those CTs appear on several rows. Filter on is_closest_us to keep one
-ultrasound per CT, or inspect n_preceding_us and us_rank_before_ct to decide
-case by case.
+ultrasound per CT, pass --us_selection, or inspect n_preceding_us and
+us_rank_before_ct to decide case by case.
 ```
 
-For one row per CT, keep `is_closest_us`:
+`--us_selection` resolves it in the run itself, keeping exactly one row per CT:
+
+| Value | Keeps |
+| --- | --- |
+| `all` (default) | Every candidate — today's behaviour, nothing dropped |
+| `closest` | The ultrasound nearest the CT (equivalent to filtering `is_closest_us`) |
+| `most_images` | The ultrasound with the largest `us_image_count` |
+
+```bash
+pixi run match --us_csv us/accessions.csv --ct_csv ct/accessions.csv \
+               --us_selection most_images
+```
+
+Use `most_images` when the ultrasound you want is **not** necessarily the latest one — a full FAST stores many more objects than a single-view IVC or vascular-access scan, so the count discriminates where timing does not:
+
+```
+# --us_selection closest       -> keeps US-B, the 2-object IVC scan
+# --us_selection most_images   -> keeps US-A, the 22-object FAST
+Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,CT-A,...,6.0,2,1,False
+Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,CT-A,...,4.0,2,2,True
+```
+
+It is a heuristic over object counts, in the same class as `--thinnest-axial`. When no candidate for a CT states an `image_count`, that CT falls back to `closest` and the run says how many did so. To see what each exam actually holds before choosing, use [`pixi run probe`](#inspecting-an-exams-series-without-downloading-it).
+
+Alternatively, filter afterwards on `is_closest_us`:
 
 ```bash
 pixi run python -c "
@@ -348,6 +375,39 @@ print(len(rows), 'rows kept')
 Timestamps are compared as absolute instants, so mixed UTC offsets and pairs crossing midnight are handled correctly. Rows without an MRN or with an unreadable `date_time` are skipped and counted in a warning; identifiers are never logged. The output file is **overwritten**, not appended to, unlike `accessions.csv`.
 
 Both inputs need `mrn`, `accession_number`, and `date_time` columns — any CSV with those works, not just one this tool wrote.
+
+#### Inspecting an exam's series without downloading it
+
+When timing alone cannot tell you which exam you want, `pixi run probe` lists what each one contains. It issues two plain queries per exam and transfers no image data — `/secure/search/series` sits outside the download handshake — so it needs no project or anonymization profile and creates no archives:
+
+```bash
+# One row per exam: series count, total objects, and the series descriptions
+pixi run probe --input_csv matched_us_ct.csv --summary \
+               --output probe_us.csv --cred_path ~/air_login.txt
+```
+
+```
+mrn,accession_number,date_time,description,study_image_count,n_series,total_series_image_count,series_descriptions
+Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,6,22,RUQ | LUQ | SUPRAPUBIC | SUBXIPHOID | RUQ REPEAT | CINE
+Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,1,2,IVC
+```
+
+Drop `--summary` for one row per series, adding `series_number`, `series_description`, `series_modality`, `series_image_count`, and `series_uid`.
+
+It accepts either CSV this tool writes, told apart by their header:
+
+- a **matched CSV** from `pixi run match` — `--which us` (default), `ct`, or `both`
+- a **search-result** `accessions.csv` — every row is probed
+
+```bash
+# Check a couple of CTs before committing to the whole cohort
+pixi run probe --input_csv matched_us_ct.csv --which ct --n 2 \
+               --cred_path ~/air_login.txt
+```
+
+**What the API does and does not report.** Per series you get only a description, a modality, a series number, a series UID, and an `imageCount`. `imageCount` counts DICOM **objects, not frames**, so a multi-frame cine clip counts once. There is no slice thickness, no imaging plane, no body part, and no protocol name anywhere in the API — which is exactly why `--thinnest-axial` has to parse descriptions. Treat counts and descriptions as evidence, not ground truth.
+
+An exam that fails is counted and the run continues; the output is overwritten rather than appended to, so re-running after a failure does not double the rows.
 
 #### Downloading a matched cohort
 
@@ -672,6 +732,13 @@ client.download(
     series_inclusion="t1,t2",
     series_exclusion="scout"
 )
+
+# List an exam's series without downloading it. Pass the exam dict back
+# verbatim; this queues no retrieval and transfers no image data.
+exam, = client.search(accession="11111111", mrn="12345")
+for s in client.list_series(exam):
+    # imageCount counts DICOM objects, not frames
+    print(s["seriesNumber"], s["description"], s["imageCount"])
 
 # List projects and profiles
 projects = client.list_projects()
