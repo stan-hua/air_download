@@ -106,6 +106,16 @@ It cannot reuse `us_ct/cohort.py`'s `read_matched_pairs`, whose `REQUIRED_COLUMN
 
 `--select thinnest_axial` previews what the downloader would keep, and **marks rows rather than dropping them** — the point is to see what was passed over, so don't "simplify" it into a filter. Header columns are added conditionally via `probe_csv_header`, so a run without `--select` has no misleading empty column. A summary row's `selected_image_count` is blank, never `0`, when nothing qualifies: "no axial series" must not read as "an axial series holding no images".
 
+### Frame counting (`frames.py`)
+
+The one module that reads local DICOM files rather than the web API — a deliberate widening of the package's scope, because **frame counts exist nowhere else**. `imageCount` counts objects; a cine clip is one object at any length. `NumberOfFrames` (0028,0008) is in the file header, so no pre-download filter on frames is possible, and anyone asking for one should be told plainly rather than pointed at `imageCount`.
+
+`dcmread(..., stop_before_pixels=True)` is what makes inspecting cheap — never drop it. Members are read whole into `BytesIO` because a header tag can sit anywhere before the pixel data; don't "optimise" this into a fixed-size prefix read.
+
+`inspect` never filters: `min_frames` only fills the `passes` column and the summary, since the point is to see the distribution before choosing a cut-off. `prune` writes a **new** tree and refuses an `output_dir` inside its input; keep it non-destructive. Both log counts only — the archives with `n_passing = 0` are named in the CSV, never in a log line, because an accession number is an identifier.
+
+Accession falls back to the archive stem when the header lacks it, since an anonymization profile may have stripped it.
+
 ### Cohort download layout (`us_ct/cohort.py`)
 
 The visit folder is the **ultrasound's** date (`MM-DD-YY`), not the CT's, so a CT that crossed midnight still files under the FAST it followed. That assumes one FAST-CT visit per patient per day; a second pair claiming the same folder gets an index suffix and a warning rather than merging two visits into one.

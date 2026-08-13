@@ -110,6 +110,7 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run match` | `air_match` | Match ultrasound exams to the CTs that followed |
 | `pixi run probe` | `air_probe` | List the series inside candidate exams without downloading them |
 | `pixi run download-cohort` | `air_cohort` | Download a matched cohort into per-patient visit folders |
+| `pixi run frames` | `air_frames` | Count frames in downloaded DICOMs, and prune to the multi-frame clips |
 | `pixi run test` | `pytest` | Run the test suite |
 
 ### Core workflows
@@ -434,7 +435,11 @@ Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,CT-A,...,6.0,2,1,False
 Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,CT-A,...,4.0,2,2,True
 ```
 
-It is a heuristic over object counts, in the same class as `--thinnest-axial`. When no candidate for a CT states an `image_count`, that CT falls back to `closest` and the run says how many did so. To see what each exam actually holds before choosing, use [`pixi run probe`](#inspecting-an-exams-series-without-downloading-it).
+It is a heuristic over object counts, in the same class as `--thinnest-axial`. When no candidate for a CT states an `image_count`, that CT falls back to `closest` and the run says how many did so.
+
+> **Know what this counts.** `image_count` counts DICOM *objects* — captures — not frames. Where ultrasounds are stored as cine clips, a 6-clip FAST reports `6` while a study saved as 20 stills reports `20`, and `most_images` would pick the wrong one. It discriminates by number of views, which is only a proxy for "a full FAST" when the exams are stored the same way. Check that assumption on your own data before trusting it: [`pixi run frames`](#counting-frames-and-keeping-only-the-real-cine-clips) gives the actual frame counts, though only after downloading.
+
+To see what each exam holds before choosing, use [`pixi run probe`](#inspecting-an-exams-series-without-downloading-it) — bearing the same caveat in mind, since probe reports the same object counts.
 
 Alternatively, filter afterwards on `is_closest_us`:
 
@@ -561,6 +566,44 @@ Note `total_series_image_count` (633) counts what *exists*; `selected_image_coun
 The counts and descriptions it reports are the whole of what the API exposes per series — see [What the API reports per series](#what-the-api-reports-per-series). Treat them as evidence, not ground truth.
 
 An exam that fails is counted and the run continues; the output is overwritten rather than appended to, so re-running after a failure does not double the rows.
+
+### Counting frames, and keeping only the real cine clips
+
+**Frame counts are the one thing the API cannot give you.** `imageCount` counts DICOM *objects*: an ultrasound cine clip is a single object whether it holds 2 frames or 200, so a FAST reporting `image_count: 7` may well contain thousands of frames. `NumberOfFrames` (0028,0008) lives in the file header and appears nowhere in the API, so **there is no way to filter on frames before downloading**. It has to be a second pass over what you already have.
+
+`pixi run frames inspect` reads the header of every downloaded instance — stopping before the pixel data, so it is far cheaper than the download that produced them — and writes two CSVs:
+
+```bash
+pixi run frames inspect --input output-cohort/ --output frames.csv --min_frames 60
+```
+
+`frames.csv`, one row per instance:
+
+```
+accession  member        series_desc  n_frames  passes
+US-A       IMG0000.dcm   RUQ               148  True
+US-A       IMG0001.dcm   LUQ               132  True
+US-A       IMG0004.dcm   (still)             1  False
+US-B       IMG0000.dcm   IVC                22  False
+```
+
+`frames_exams.csv`, one row per archive, which is where you spot exams that would drop out of the cohort entirely:
+
+```
+accession  n_instances  n_passing  max_frames  total_frames
+US-A                 7          4         148           450
+US-B                 2          0          22            23
+```
+
+`--min_frames` only fills in `passes` and the summary counts — **every instance is reported either way**, so you can look at the distribution before committing to a threshold. A run warns when any archive has `n_passing = 0`, naming the count rather than the accession numbers; the CSV has the identifiers.
+
+Once the cut-off looks right, prune into a **new** tree. The source archives are never modified:
+
+```bash
+pixi run frames prune --input output-cohort/ --output_dir output-60frames/ --min_frames 60
+```
+
+Each archive is rewritten at the same relative path holding only the qualifying instances; one left with nothing is not written at all and is counted in a warning. Writing inside `--input` is refused, so a run cannot read its own output.
 
 ### Retries
 
