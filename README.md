@@ -174,7 +174,7 @@ Because the data source decides how `-d` matches, pair it with `-xd` when you ne
 pixi run search -m CT -xd "abdomen pelvis" -c ~/air_login.txt
 ```
 
-Both flags work with `pixi run download` too, but a modality-only download pulls every matching exam across patients — preview it with `pixi run search` first.
+Both flags work with `pixi run download` too, but a modality-only download pulls every matching exam across patients — preview it with `pixi run search` first. The client-side filters are covered in [Narrowing to the exams and series you want](#narrowing-to-the-exams-and-series-you-want).
 
 **Restrict the search to a date window:**
 
@@ -199,6 +199,80 @@ pixi run search -m CT -ds 2024-01-01 -de 2024-06-01 --chunk-days 2 -c ~/air_logi
 ```
 
 Dates narrow a search but do not constitute one on their own — pair them with an accession, `--mrn`, `--modality`, or `--study-description`.
+
+**List available projects or anonymization profiles:**
+
+```bash
+pixi run list-projects -c ~/air_login.txt          # list projects
+pixi run list-profiles -c ~/air_login.txt          # list profiles
+pixi run download -c ~/air_login.txt -lpj -lpf     # both at once
+```
+
+### Narrowing to the exams and series you want
+
+The client-side filters from the table above run on whatever the server returned. They apply to `pixi run search` as well as `pixi run download`, so you can preview what a download would fetch.
+
+**Filter by modality, description, or series:**
+
+```bash
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ \
+    -xm MR \
+    -xd "BRAIN WITH AND WITHOUT CONTRAST" \
+    -s "t1,spgr,bravo,mpr"
+```
+
+**Exclude exams or series by pattern:**
+
+```bash
+# Exclude scout and localizer exams
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm-exclude "scout,localizer"
+
+# Exclude secondary exams
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xd-exclude "secondary"
+
+# Exclude scout series
+pixi run download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude "scout"
+
+# Combine inclusion and exclusion (keep MR but exclude localizer)
+pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
+```
+
+#### Keeping only the structured report and the thinnest axial CT
+
+```bash
+pixi run download -m CT -ds 2024-01-01 -c ~/air_login.txt -o output/ --thinnest-axial
+```
+
+For each exam this keeps every structured report (SR) series plus the single axial CT series with the thinnest slices, dropping scouts, reformats, and the thicker axial reconstructions:
+
+```
+SCOUT                 2 images   CT   dropped
+AXIAL 5MM STD        60 images   CT   dropped
+AXIAL 0.625MM BONE  480 images   CT   kept    <- thinnest
+AXIAL 2.5MM SOFT    120 images   CT   dropped
+COR 3MM MPR          90 images   CT   dropped
+Dose Report           1 image    SR   kept
+```
+
+<a id="what-the-api-reports-per-series"></a>
+**What the API reports per series.** Only `description`, `imageCount`, `modality`, `seriesNumber`, and `seriesUid` — there is no slice thickness, no imaging plane, no body part, and no protocol name anywhere in the API. `imageCount` counts DICOM **objects, not frames**, so a multi-frame cine clip counts once however long it runs. Everything below follows from that gap, and it is why series selection has to read descriptions.
+
+Structured reports are identified by their series **modality**, which the API reports exactly, so that half is not a guess. The axial selection is a heuristic:
+
+- **Axial** means the description contains `ax`, `axial`, `tra`, `trans`, or `transverse` as a **whole word**, case-insensitive. Whole-word matching is what keeps `THORAX` and `TRAUMA` from counting as axial. Override with `--axial-patterns "ax,axial"` if your site names things differently.
+- **Thinnest** is read from the description when the protocol states it — `AXIAL 0.625MM` → 0.625mm. Values below 0.1mm or above 20mm are ignored as something other than a thickness (a field of view, for instance), and the smallest plausible value wins if several appear.
+- **If no axial series states a thickness**, the one with the most images is chosen instead, on the basis that more images means thinner slices at equal coverage. This is logged when it happens, since it is wrong if the series cover different anatomy.
+- **If nothing matches as axial**, a warning names the patterns tried and only the structured reports are kept.
+
+Run it under `-v` the first few times to see which series each exam actually selected:
+
+```bash
+pixi run download 11111111 -c ~/air_login.txt -o output/ --thinnest-axial -v
+INFO: Thinnest axial series: 'AXIAL 0.625MM BONE' (0.625mm, 480 images).
+INFO: Series selection: from 6 to 2 (1 structured report(s)).
+```
+
+`--thinnest-axial` runs after `-s` and `-s-exclude`, so those can pre-trim the candidates.
 
 ### Building a cohort, then downloading it
 
@@ -299,7 +373,7 @@ A4,U4,2021-04-01T22:00:00-07:00,US ED BEDSIDE,18,C4,2021-04-02T03:00:00-07:00,CT
 
 `hours_between` is there so you can sanity-check the window and tighten it afterwards without re-running.
 
-`us_image_count` and `ct_image_count` are carried straight through from the `image_count` column of the search results. They count **DICOM objects, not frames** — an ultrasound cine clip counts once however long it runs — but they still separate a multi-view FAST from a single-view bedside scan. An older `accessions.csv` written before that column existed still matches; the two columns come out empty.
+`us_image_count` and `ct_image_count` are carried straight through from the `image_count` column of the search results. They count [objects, not frames](#what-the-api-reports-per-series), but they still separate a multi-view FAST from a single-view bedside scan. An older `accessions.csv` written before that column existed still matches; the two columns come out empty.
 
 When a patient has **several qualifying CTs**, the default keeps the **earliest** one — the CT that actually followed the ultrasound. `--all_pairs` emits every qualifying CT instead:
 
@@ -376,39 +450,6 @@ Timestamps are compared as absolute instants, so mixed UTC offsets and pairs cro
 
 Both inputs need `mrn`, `accession_number`, and `date_time` columns — any CSV with those works, not just one this tool wrote.
 
-#### Inspecting an exam's series without downloading it
-
-When timing alone cannot tell you which exam you want, `pixi run probe` lists what each one contains. It issues two plain queries per exam and transfers no image data — `/secure/search/series` sits outside the download handshake — so it needs no project or anonymization profile and creates no archives:
-
-```bash
-# One row per exam: series count, total objects, and the series descriptions
-pixi run probe --input_csv matched_us_ct.csv --summary \
-               --output probe_us.csv --cred_path ~/air_login.txt
-```
-
-```
-mrn,accession_number,date_time,description,study_image_count,n_series,total_series_image_count,series_descriptions
-Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,6,22,RUQ | LUQ | SUPRAPUBIC | SUBXIPHOID | RUQ REPEAT | CINE
-Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,1,2,IVC
-```
-
-Drop `--summary` for one row per series, adding `series_number`, `series_description`, `series_modality`, `series_image_count`, and `series_uid`.
-
-It accepts either CSV this tool writes, told apart by their header:
-
-- a **matched CSV** from `pixi run match` — `--which us` (default), `ct`, or `both`
-- a **search-result** `accessions.csv` — every row is probed
-
-```bash
-# Check a couple of CTs before committing to the whole cohort
-pixi run probe --input_csv matched_us_ct.csv --which ct --n 2 \
-               --cred_path ~/air_login.txt
-```
-
-**What the API does and does not report.** Per series you get only a description, a modality, a series number, a series UID, and an `imageCount`. `imageCount` counts DICOM **objects, not frames**, so a multi-frame cine clip counts once. There is no slice thickness, no imaging plane, no body part, and no protocol name anywhere in the API — which is exactly why `--thinnest-axial` has to parse descriptions. Treat counts and descriptions as evidence, not ground truth.
-
-An exam that fails is counted and the run continues; the output is overwritten rather than appended to, so re-running after a failure does not double the rows.
-
 #### Downloading a matched cohort
 
 `pixi run download-cohort` takes the matched CSV directly and lays the exams out one folder per patient, one subfolder per visit:
@@ -455,6 +496,39 @@ with open('matched_ct_only.csv','w',newline='') as f:
 pixi run download --accessions-csv matched_ct_only.csv -o matched_ct_dicom/ --thinnest-axial
 ```
 
+### Inspecting an exam's series without downloading it
+
+When a description and a timestamp are not enough to tell you which exam you want, `pixi run probe` lists what each one actually contains. It issues two plain queries per exam and transfers no image data — `/secure/search/series` sits outside the download handshake — so it needs no project or anonymization profile and creates no archives:
+
+```bash
+# One row per exam: series count, total objects, and the series descriptions
+pixi run probe --input_csv matched_us_ct.csv --summary \
+               --output probe_us.csv --cred_path ~/air_login.txt
+```
+
+```
+mrn,accession_number,date_time,description,study_image_count,n_series,total_series_image_count,series_descriptions
+Z1,US-A,2021-03-02T08:00:00-08:00,US ED BEDSIDE FAST,22,6,22,RUQ | LUQ | SUPRAPUBIC | SUBXIPHOID | RUQ REPEAT | CINE
+Z1,US-B,2021-03-02T10:00:00-08:00,US ED BEDSIDE IVC,2,1,2,IVC
+```
+
+Drop `--summary` for one row per series, adding `series_number`, `series_description`, `series_modality`, `series_image_count`, and `series_uid`.
+
+It accepts either CSV this tool writes, told apart by their header:
+
+- a **matched CSV** from `pixi run match` — `--which us` (default), `ct`, or `both`
+- a **search-result** `accessions.csv` — every row is probed
+
+```bash
+# Check a couple of CTs before committing to the whole cohort
+pixi run probe --input_csv matched_us_ct.csv --which ct --n 2 \
+               --cred_path ~/air_login.txt
+```
+
+The counts and descriptions it reports are the whole of what the API exposes per series — see [What the API reports per series](#what-the-api-reports-per-series). Treat them as evidence, not ground truth.
+
+An exam that fails is counted and the run continues; the output is overwritten rather than appended to, so re-running after a failure does not double the rows.
+
 ### Retries
 
 Requests that fail transiently — connection errors, timeouts, rate limiting (`429`), and server errors (`5xx`) — are retried automatically with exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 60s. If the server sends a numeric `Retry-After` header, that wins over the computed delay. Ordinary client errors such as `401` or `404` fail immediately, since retrying cannot help.
@@ -470,75 +544,6 @@ From the Python API, tune the policy on the client:
 
 ```python
 client = AIRClient(cred_path="...", max_retries=10, backoff_factor=2.0, max_backoff=120)
-```
-
-**Filter by modality, description, or series:**
-
-```bash
-pixi run download --mrn 12345 -c ~/air_login.txt -o output/ \
-    -xm MR \
-    -xd "BRAIN WITH AND WITHOUT CONTRAST" \
-    -s "t1,spgr,bravo,mpr"
-```
-
-**Exclude exams or series by pattern:**
-
-```bash
-# Exclude scout and localizer exams
-pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm-exclude "scout,localizer"
-
-# Exclude secondary exams
-pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xd-exclude "secondary"
-
-# Exclude scout series
-pixi run download 11111111 -c ~/air_login.txt -o output/ -pj 5 -pf 3 -s-exclude "scout"
-
-# Combine inclusion and exclusion (keep MR but exclude localizer)
-pixi run download --mrn 12345 -c ~/air_login.txt -o output/ -xm "MR" -xm-exclude "localizer"
-```
-
-The same filter flags apply to `pixi run search` when you want to preview what a download would fetch.
-
-**Keep only the structured report and the thinnest axial CT:**
-
-```bash
-pixi run download -m CT -ds 2024-01-01 -c ~/air_login.txt -o output/ --thinnest-axial
-```
-
-For each exam this keeps every structured report (SR) series plus the single axial CT series with the thinnest slices, dropping scouts, reformats, and the thicker axial reconstructions:
-
-```
-SCOUT                 2 images   CT   dropped
-AXIAL 5MM STD        60 images   CT   dropped
-AXIAL 0.625MM BONE  480 images   CT   kept    <- thinnest
-AXIAL 2.5MM SOFT    120 images   CT   dropped
-COR 3MM MPR          90 images   CT   dropped
-Dose Report           1 image    SR   kept
-```
-
-Structured reports are identified by their series **modality**, which the API reports exactly, so that half is not a guess. The axial selection is a heuristic, because the API exposes no slice thickness or plane field — only `description`, `imageCount`, `modality`, `seriesNumber`, and `seriesUid`. So:
-
-- **Axial** means the description contains `ax`, `axial`, `tra`, `trans`, or `transverse` as a **whole word**, case-insensitive. Whole-word matching is what keeps `THORAX` and `TRAUMA` from counting as axial. Override with `--axial-patterns "ax,axial"` if your site names things differently.
-- **Thinnest** is read from the description when the protocol states it — `AXIAL 0.625MM` → 0.625mm. Values below 0.1mm or above 20mm are ignored as something other than a thickness (a field of view, for instance), and the smallest plausible value wins if several appear.
-- **If no axial series states a thickness**, the one with the most images is chosen instead, on the basis that more images means thinner slices at equal coverage. This is logged when it happens, since it is wrong if the series cover different anatomy.
-- **If nothing matches as axial**, a warning names the patterns tried and only the structured reports are kept.
-
-Run it under `-v` the first few times to see which series each exam actually selected:
-
-```bash
-pixi run download 11111111 -c ~/air_login.txt -o output/ --thinnest-axial -v
-INFO: Thinnest axial series: 'AXIAL 0.625MM BONE' (0.625mm, 480 images).
-INFO: Series selection: from 6 to 2 (1 structured report(s)).
-```
-
-`--thinnest-axial` runs after `-s` and `-s-exclude`, so those can pre-trim the candidates.
-
-**List available projects or anonymization profiles:**
-
-```bash
-pixi run list-projects -c ~/air_login.txt          # list projects
-pixi run list-profiles -c ~/air_login.txt          # list profiles
-pixi run download -c ~/air_login.txt -lpj -lpf     # both at once
 ```
 
 ### Full CLI reference
