@@ -224,10 +224,11 @@ def parse_args() -> argparse.Namespace:
         "--thinnest-axial",
         action="store_true",
         help=(
-            "For each exam, keep only the structured report (SR) series plus "
-            "the single axial CT series with the thinnest slices. Thickness "
-            "is read from the series description (e.g. '0.625MM'); if no "
-            "axial series states one, the series with the most images wins. "
+            "For each exam, keep only the single axial CT series with the "
+            "thinnest slices, dropping everything else including structured "
+            "reports. Thickness is read from the series description (e.g. "
+            "'0.625MM'); if no axial series states one, the series with the "
+            "most images wins. An exam with no axial series is skipped. "
             "Applied after -s and -s-exclude."
         ),
     )

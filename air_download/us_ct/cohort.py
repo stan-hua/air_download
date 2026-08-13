@@ -8,8 +8,8 @@ Description: Download a matched ultrasound-CT cohort into one folder per
 Each row of the matched CSV becomes ``<output>/<mrn>/<MM-DD-YY>/``, holding
 the ultrasound under ``us/`` and the CT under ``ct/``. The visit folder is
 named for the date of the ultrasound, since that is the exam the CT followed.
-The CT is reduced to its structured report plus the thinnest axial series,
-while every series of the ultrasound is kept.
+The CT is reduced to its thinnest axial series alone, while every series
+of the ultrasound is kept.
 
 Examples
 --------
@@ -283,9 +283,10 @@ def download_cohort(
     """Download every matched ultrasound-CT pair into per-visit folders.
 
     The ultrasound keeps all of its series; the CT is reduced to its
-    structured report plus the thinnest axial series, as ``--thinnest-axial``
-    does. A failed exam is counted and the run continues, so one bad row
-    cannot end a long download.
+    thinnest axial series alone, as ``--thinnest-axial`` does. A CT with no
+    axial series yields no archive and is counted as failed. A failed exam
+    is counted and the run continues, so one bad row cannot end a long
+    download.
 
     Parameters
     ----------

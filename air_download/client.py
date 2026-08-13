@@ -16,7 +16,7 @@ from air_download.filters import (
     DEFAULT_AXIAL_PATTERNS,
     apply_exclusion_filter,
     apply_inclusion_filter,
-    select_sr_and_thinnest_axial,
+    keep_thinnest_axial,
 )
 from air_download.utils import (
     DEFAULT_CHUNK_DAYS,
@@ -845,8 +845,8 @@ class AIRClient:
             profile: Anonymization profile ID.
             series_inclusion: Comma-separated series filter patterns.
             series_exclusion: Comma-separated series exclusion patterns.
-            thinnest_axial: If True, keep only the structured reports and the
-                thinnest axial CT series.
+            thinnest_axial: If True, keep only the thinnest axial CT series
+                and drop everything else, structured reports included.
             axial_patterns: Comma-separated plane names identifying an axial
                 series.
         """
@@ -857,7 +857,7 @@ class AIRClient:
         series = apply_inclusion_filter(series, "description", series_inclusion)
         series = apply_exclusion_filter(series, "description", series_exclusion)
         if thinnest_axial:
-            series = select_sr_and_thinnest_axial(series, axial_patterns)
+            series = keep_thinnest_axial(series, axial_patterns)
         if not series:
             logger.warning(
                 "No series found for %s. Check your search parameters.",

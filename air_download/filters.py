@@ -194,15 +194,22 @@ def select_thinnest_axial(
     return chosen
 
 
-def select_sr_and_thinnest_axial(
+def parse_axial_patterns(axial_patterns: str) -> list[str]:
+    """Split a comma-separated pattern string into lower-case plane names."""
+    return [p.strip().lower() for p in axial_patterns.split(",") if p.strip()]
+
+
+def keep_thinnest_axial(
     series: list[dict[str, Any]],
     axial_patterns: str = DEFAULT_AXIAL_PATTERNS,
 ) -> list[dict[str, Any]]:
-    """Keep every structured report plus the thinnest axial series.
+    """Keep the thinnest axial series and nothing else.
 
-    Structured reports are identified by their series modality, which the
-    API reports exactly. The axial series is identified by description,
-    since plane and thickness are not exposed as fields.
+    Structured reports are dropped along with scouts, reformats, and the
+    thicker reconstructions: the reconstruction is the point of the
+    selection, and an SR carries no image data. The axial series is
+    identified by description, since plane and thickness are not exposed as
+    fields.
 
     Args:
         series: The series to select from, in API order.
@@ -210,29 +217,21 @@ def select_sr_and_thinnest_axial(
             series.
 
     Returns:
-        The selected series, in their original order.
+        A single-element list holding the chosen series, or an empty list
+        when nothing qualifies as axial.
     """
-    patterns = [p.strip().lower() for p in axial_patterns.split(",") if p.strip()]
+    patterns = parse_axial_patterns(axial_patterns)
     chosen = select_thinnest_axial(series, patterns)
 
-    keep = {
-        index
-        for index, s in enumerate(series)
-        if _modality(s) == "SR" or (chosen is not None and s is chosen)
-    }
     if chosen is None:
         logger.warning(
-            "No axial CT series matched %s among %d series; keeping "
-            "structured reports only.",
+            "No axial CT series matched %s among %d series. Nothing is kept "
+            "for this exam, so no archive is written; widen "
+            "--axial-patterns if the series are named differently.",
             patterns,
             len(series),
         )
+        return []
 
-    selected = [s for index, s in enumerate(series) if index in keep]
-    logger.info(
-        "Series selection: from %d to %d (%d structured report(s)).",
-        len(series),
-        len(selected),
-        sum(1 for s in selected if _modality(s) == "SR"),
-    )
-    return selected
+    logger.info("Series selection: from %d to 1 (thinnest axial).", len(series))
+    return [chosen]
