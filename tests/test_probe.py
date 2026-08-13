@@ -17,10 +17,24 @@ from air_download.probe import (
     PER_SERIES_HEADER,
     SUMMARY_HEADER,
     matched_modalities,
+    probe_csv_header,
     probe_series,
     read_exam_pairs,
     write_probe_csv,
 )
+
+# A CT with scouts, several axials, a reformat, and a structured report.
+CT_SERIES = [
+    {"description": "SCOUT", "imageCount": 2, "modality": "CT", "seriesNumber": "1"},
+    {"description": "AXIAL 5MM STD", "imageCount": 60, "modality": "CT",
+     "seriesNumber": "2"},
+    {"description": "AXIAL 0.625MM BONE", "imageCount": 480, "modality": "CT",
+     "seriesNumber": "3"},
+    {"description": "COR 3MM MPR", "imageCount": 90, "modality": "CT",
+     "seriesNumber": "4"},
+    {"description": "Dose Report", "imageCount": 1, "modality": "SR",
+     "seriesNumber": "999"},
+]
 
 MATCHED_HEADER = ["mrn", "us_accession_number", "us_date_time", "ct_accession_number"]
 SEARCH_HEADER = [
@@ -353,13 +367,15 @@ class TestProbeSeries:
         probe_series(self._matched(tmp_path), output=out, modalities="us")
         assert read_rows(out) == []
 
-    def test_a_failure_does_not_end_the_run(self, tmp_path, stub_client):
+    def test_a_failure_does_not_end_the_run(self, tmp_path, stub_client, monkeypatch):
         def explode(self, study):
             if study["accessionNumber"] == "U1":
                 raise RuntimeError("boom")
             return [{"description": "RUQ", "imageCount": 1, "modality": "US"}]
 
-        stub_client.list_series = explode
+        # Through monkeypatch so it is undone: a bare assignment here rebinds
+        # the class attribute for the rest of the session.
+        monkeypatch.setattr(stub_client, "list_series", explode)
         out = tmp_path / "probe.csv"
         probe_series(
             self._matched(
@@ -400,3 +416,123 @@ class TestProbeSeries:
             output=tmp_path / "probe.csv",
         )
         assert stub_client.instances == []
+
+
+class TestSelectionPreview:
+    """--select marks what --thinnest-axial would keep, dropping nothing."""
+
+    def _matched(self, tmp_path):
+        return write_csv(
+            tmp_path / "matched.csv",
+            [["A1", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
+            MATCHED_HEADER,
+        )
+
+    def test_header_gains_the_column_only_when_selecting(self):
+        assert probe_csv_header() == PER_SERIES_HEADER
+        assert probe_csv_header(mark_selection=True) == PER_SERIES_HEADER + ["selected"]
+        assert probe_csv_header(summary=True) == SUMMARY_HEADER
+        assert probe_csv_header(summary=True, mark_selection=True) == SUMMARY_HEADER + [
+            "selected_description",
+            "selected_image_count",
+        ]
+
+    def test_marks_the_thinnest_axial(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {"C1": CT_SERIES}
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="ct",
+            select="thinnest_axial",
+        )
+        rows = read_rows(out)
+        selected = [r["series_description"] for r in rows if r["selected"] == "True"]
+        assert selected == ["AXIAL 0.625MM BONE"]
+
+    def test_drops_nothing(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {"C1": CT_SERIES}
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="ct",
+            select="thinnest_axial",
+        )
+        # Every series is still reported, so you can see what was passed over.
+        assert len(read_rows(out)) == len(CT_SERIES)
+
+    def test_structured_report_is_never_selected(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {"C1": CT_SERIES}
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="ct",
+            select="thinnest_axial",
+        )
+        (sr,) = [r for r in read_rows(out) if r["series_modality"] == "SR"]
+        assert sr["selected"] == "False"
+
+    def test_summary_reports_the_chosen_series(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {"C1": CT_SERIES}
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="ct",
+            select="thinnest_axial", summary=True,
+        )
+        (row,) = read_rows(out)
+        assert row["selected_description"] == "AXIAL 0.625MM BONE"
+        assert row["selected_image_count"] == "480"
+        # What exists vs. what would be retrieved: 633 objects, 480 wanted.
+        assert row["total_series_image_count"] == "633"
+
+    def test_nothing_selected_for_a_non_ct_exam(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {
+            "U1": [{"description": "RUQ", "imageCount": 4, "modality": "US"}]
+        }
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="us",
+            select="thinnest_axial", summary=True,
+        )
+        (row,) = read_rows(out)
+        # Blank, not 0: "no axial series" is not "an axial series with no images".
+        assert row["selected_description"] == ""
+        assert row["selected_image_count"] == ""
+
+    def test_warns_when_a_probed_exam_selects_nothing(self, tmp_path, stub_client,
+                                                      caplog):
+        stub_client.series_by_accession = {
+            "C1": [{"description": "COR 3MM MPR", "imageCount": 90, "modality": "CT"}]
+        }
+        out = tmp_path / "probe.csv"
+        with caplog.at_level("WARNING"):
+            probe_series(
+                self._matched(tmp_path), output=out, modalities="ct",
+                select="thinnest_axial",
+            )
+        assert "would download nothing" in caplog.text
+
+    def test_custom_axial_patterns_are_honoured(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {
+            "C1": [
+                {"description": "TRANSVERSE 1MM", "imageCount": 300, "modality": "CT"},
+                {"description": "AXIAL 2MM", "imageCount": 300, "modality": "CT"},
+            ]
+        }
+        out = tmp_path / "probe.csv"
+        probe_series(
+            self._matched(tmp_path), output=out, modalities="ct",
+            select="thinnest_axial", axial_patterns="transverse",
+        )
+        selected = [
+            r["series_description"] for r in read_rows(out) if r["selected"] == "True"
+        ]
+        assert selected == ["TRANSVERSE 1MM"]
+
+    def test_no_selection_columns_without_the_flag(self, tmp_path, stub_client):
+        stub_client.series_by_accession = {"C1": CT_SERIES}
+        out = tmp_path / "probe.csv"
+        probe_series(self._matched(tmp_path), output=out, modalities="ct")
+        assert "selected" not in read_rows(out)[0]
+
+    def test_rejects_an_unknown_selection(self, tmp_path, stub_client):
+        with pytest.raises(ValueError, match="Unknown select"):
+            probe_series(
+                self._matched(tmp_path), output=tmp_path / "p.csv", select="biggest",
+            )

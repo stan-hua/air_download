@@ -41,6 +41,12 @@ Pick two modalities out of a wider pairing::
 
     pixi run probe --input_csv matched_us_ct_mr.csv --modalities us,mr \
         --cred_path ~/air_login.txt
+
+Check which CT series ``--thinnest-axial`` would actually keep, before
+downloading anything::
+
+    pixi run probe --input_csv matched_us_ct.csv --modalities ct \
+        --select thinnest_axial --cred_path ~/air_login.txt
 """
 
 # Standard libraries
@@ -56,6 +62,11 @@ from tqdm import tqdm
 
 # Custom libraries
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
+from air_download.filters import (
+    DEFAULT_AXIAL_PATTERNS,
+    parse_axial_patterns,
+    select_thinnest_axial,
+)
 from air_download.utils import configure_logging, read_accession_pairs
 
 logger = logging.getLogger(__name__)
@@ -93,6 +104,15 @@ SUMMARY_HEADER = [
     "total_series_image_count",
     "series_descriptions",
 ]
+
+# Appended when --select is in play. Rows are marked rather than dropped, so
+# the output still shows what the selection passed over.
+PER_SERIES_SELECT_COLUMNS = ["selected"]
+SUMMARY_SELECT_COLUMNS = ["selected_description", "selected_image_count"]
+
+# The only selection worth previewing: what `--thinnest-axial` would keep.
+THINNEST_AXIAL = "thinnest_axial"
+SELECT_CHOICES = (THINNEST_AXIAL,)
 
 # Separator for the joined series descriptions of a summary row.
 _DESCRIPTION_SEPARATOR = " | "
@@ -254,7 +274,11 @@ def _as_count(value: Any) -> int:
 
 
 def _series_rows(
-    mrn: str, exam: dict[str, Any], series: list[dict[str, Any]]
+    mrn: str,
+    exam: dict[str, Any],
+    series: list[dict[str, Any]],
+    chosen: dict[str, Any] | None = None,
+    mark_selection: bool = False,
 ) -> list[dict[str, Any]]:
     """Build one output row per series of an exam."""
     common = {
@@ -264,8 +288,9 @@ def _series_rows(
         "description": exam.get("description", ""),
         "study_image_count": exam.get("imageCount", ""),
     }
-    return [
-        {
+    rows = []
+    for s in series:
+        row = {
             **common,
             "series_number": s.get("seriesNumber", ""),
             "series_description": s.get("description", ""),
@@ -273,15 +298,22 @@ def _series_rows(
             "series_image_count": s.get("imageCount", ""),
             "series_uid": s.get("seriesUid", ""),
         }
-        for s in series
-    ]
+        if mark_selection:
+            # Identity, not equality: two series can carry the same fields.
+            row["selected"] = chosen is not None and s is chosen
+        rows.append(row)
+    return rows
 
 
 def _summary_row(
-    mrn: str, exam: dict[str, Any], series: list[dict[str, Any]]
+    mrn: str,
+    exam: dict[str, Any],
+    series: list[dict[str, Any]],
+    chosen: dict[str, Any] | None = None,
+    mark_selection: bool = False,
 ) -> dict[str, Any]:
     """Reduce an exam's series to the single row you sort candidates on."""
-    return {
+    row = {
         "mrn": mrn,
         "accession_number": exam.get("accessionNumber", ""),
         "date_time": exam.get("dateTime", ""),
@@ -293,10 +325,31 @@ def _summary_row(
             (s.get("description") or "").strip() for s in series
         ),
     }
+    if mark_selection:
+        # Blank rather than zero when nothing qualifies, so "no axial series
+        # here" cannot be misread as "an axial series holding no images".
+        row["selected_description"] = (
+            (chosen.get("description") or "").strip() if chosen else ""
+        )
+        row["selected_image_count"] = (
+            _as_count(chosen.get("imageCount")) if chosen else ""
+        )
+    return row
+
+
+def probe_csv_header(summary: bool = False, mark_selection: bool = False) -> list[str]:
+    """Return the column names for a given combination of output options."""
+    header = list(SUMMARY_HEADER if summary else PER_SERIES_HEADER)
+    if mark_selection:
+        header += SUMMARY_SELECT_COLUMNS if summary else PER_SERIES_SELECT_COLUMNS
+    return header
 
 
 def write_probe_csv(
-    rows: list[dict[str, Any]], output: Path, summary: bool = False
+    rows: list[dict[str, Any]],
+    output: Path,
+    summary: bool = False,
+    mark_selection: bool = False,
 ) -> Path:
     """Write probe results to a CSV, overwriting any existing file.
 
@@ -306,11 +359,13 @@ def write_probe_csv(
     Parameters
     ----------
     rows : list of dict
-        Rows keyed by :data:`SUMMARY_HEADER` or :data:`PER_SERIES_HEADER`.
+        Rows keyed as :func:`probe_csv_header` describes.
     output : Path
         Destination path.
     summary : bool, optional
         Whether ``rows`` are summary rows.
+    mark_selection : bool, optional
+        Whether the rows carry the selection columns.
 
     Returns
     -------
@@ -322,7 +377,7 @@ def write_probe_csv(
         output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=SUMMARY_HEADER if summary else PER_SERIES_HEADER
+            f, fieldnames=probe_csv_header(summary, mark_selection)
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -334,6 +389,8 @@ def probe_series(
     output: str | Path = "probe_series.csv",
     modalities: Any = DEFAULT_MODALITIES,
     summary: bool = False,
+    select: str | None = None,
+    axial_patterns: str = DEFAULT_AXIAL_PATTERNS,
     n: int | None = None,
     url: str | None = None,
     cred_path: str | Path | None = None,
@@ -358,6 +415,14 @@ def probe_series(
     summary : bool, optional
         Write one row per exam (series count, total objects, joined
         descriptions) rather than one row per series.
+    select : str, optional
+        Mark what a series selection would keep, without dropping the rest.
+        Only ``thinnest_axial`` is supported, mirroring ``--thinnest-axial``
+        on the downloader. Adds a ``selected`` column per series, or the
+        chosen series' description and count to a summary row.
+    axial_patterns : str, optional
+        Comma-separated plane names identifying an axial series, used only
+        when ``select`` is set.
     n : int, optional
         Probe only the first ``n`` exams.
     url : str, optional
@@ -377,6 +442,14 @@ def probe_series(
         If ``n`` is less than 1, or a requested modality is not in the CSV.
     """
     configure_logging(verbose, quiet)
+
+    if select is not None and select not in SELECT_CHOICES:
+        raise ValueError(
+            f"Unknown select '{select}'. Choose one of: "
+            f"{', '.join(SELECT_CHOICES)}."
+        )
+    mark_selection = select is not None
+    patterns = parse_axial_patterns(axial_patterns) if mark_selection else []
 
     pairs = read_exam_pairs(input_csv, modalities)
 
@@ -399,7 +472,7 @@ def probe_series(
     client = AIRClient(url=url, cred_path=cred_path, max_retries=max_retries)
 
     rows: list[dict[str, Any]] = []
-    counts = {"probed": 0, "not_found": 0, "failed": 0}
+    counts = {"probed": 0, "not_found": 0, "failed": 0, "nothing_selected": 0}
 
     for mrn, accession in tqdm(pairs, desc="Probing exams", total=len(pairs)):
         try:
@@ -415,10 +488,20 @@ def probe_series(
                 )
             exam = exams[0]
             series = client.list_series(exam)
+            # The picker rather than keep_thinnest_axial: it makes the same
+            # choice but stays quiet when nothing qualifies, which is the
+            # normal case for every non-CT exam being previewed.
+            chosen = select_thinnest_axial(series, patterns) if mark_selection else None
+            if mark_selection and chosen is None:
+                counts["nothing_selected"] += 1
             if summary:
-                rows.append(_summary_row(mrn, exam, series))
+                rows.append(
+                    _summary_row(mrn, exam, series, chosen, mark_selection)
+                )
             else:
-                rows.extend(_series_rows(mrn, exam, series))
+                rows.extend(
+                    _series_rows(mrn, exam, series, chosen, mark_selection)
+                )
             counts["probed"] += 1
         except Exception as exc:  # noqa: BLE001 - one bad exam is not fatal
             counts["failed"] += 1
@@ -429,7 +512,7 @@ def probe_series(
             # Only at DEBUG: the detail can carry an identifier.
             logger.debug("Failure detail: %s", exc)
 
-    written = write_probe_csv(rows, Path(output), summary)
+    written = write_probe_csv(rows, Path(output), summary, mark_selection)
     logger.info(
         "Probed %d exam(s) into %d row(s), written to %s. %d exam(s) matched "
         "nothing, %d failed. Nothing was downloaded.",
@@ -441,6 +524,15 @@ def probe_series(
     )
     if counts["failed"]:
         logger.warning("%d exam(s) failed; re-run to retry them.", counts["failed"])
+    if counts["nothing_selected"]:
+        logger.warning(
+            "%d of %d probed exam(s) have no axial series matching %s, so "
+            "'--thinnest-axial' would download nothing for them. Expected "
+            "for non-CT exams; for a CT it means the patterns need widening.",
+            counts["nothing_selected"],
+            counts["probed"],
+            patterns,
+        )
 
 
 def cli() -> None:
