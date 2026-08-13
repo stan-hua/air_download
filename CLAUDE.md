@@ -96,7 +96,9 @@ Lists what an exam contains without downloading it. `AIRClient.list_series` is t
 
 **`imageCount` counts DICOM objects, not frames.** A multi-frame ultrasound cine clip counts once however long it runs. The API exposes no `NumberOfFrames`, no slice thickness, no plane, no body part, and no protocol name — the whole per-series surface is `description`, `imageCount`, `modality`, `seriesNumber`, `seriesUid`. Don't describe a count as a frame count, and don't propose a query for anything else in that list; it does not exist.
 
-`read_exam_pairs` dispatches on the CSV header (`us_accession_number` present ⇒ matched CSV) and reuses `cohort.read_matched_pairs` / `utils.read_accession_pairs` rather than parsing again, which is what keeps the (MRN, accession) pairing requirement intact. Output is overwritten, like `match.py` and unlike `write_exams_csv`.
+`read_exam_pairs` dispatches on the CSV header. `matched_modalities` reads the pairing's modalities off it via `^(.+)_accession_number$`, so **nothing about US/CT is hard-coded** — any pairing works, and `--modalities` selects among what the file declares. An unprefixed `accession_number` deliberately fails that regex, which is exactly what distinguishes a search-result CSV; that branch delegates to `utils.read_accession_pairs`. Don't reintroduce a fixed column list.
+
+It cannot reuse `cohort.read_matched_pairs`, whose `REQUIRED_COLUMNS` fixes the us/ct shape; the matched branch parses rows itself but keeps the same rules — MRN and accession required together, blanks skipped and counted, duplicate pairs collapsed (which matters because `--search-only` appends). Output is overwritten, like `match.py` and unlike `write_exams_csv`.
 
 ### Cohort download layout (`cohort.py`)
 

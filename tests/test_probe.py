@@ -16,6 +16,7 @@ from air_download import probe
 from air_download.probe import (
     PER_SERIES_HEADER,
     SUMMARY_HEADER,
+    matched_modalities,
     probe_series,
     read_exam_pairs,
     write_probe_csv,
@@ -103,34 +104,87 @@ def read_rows(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+class TestMatchedModalities:
+    """Reading a pairing's modalities off its header."""
+
+    def test_finds_them_in_header_order(self):
+        assert matched_modalities(MATCHED_HEADER) == ["us", "ct"]
+
+    def test_any_modality_not_just_us_and_ct(self):
+        header = ["mrn", "mr_accession_number", "xr_accession_number"]
+        assert matched_modalities(header) == ["mr", "xr"]
+
+    def test_arbitrary_number_of_modalities(self):
+        header = [
+            "mrn",
+            "us_accession_number",
+            "ct_accession_number",
+            "mr_accession_number",
+            "pet_accession_number",
+        ]
+        assert matched_modalities(header) == ["us", "ct", "mr", "pet"]
+
+    def test_unprefixed_accession_number_is_not_a_modality(self):
+        # This is what tells a search-result CSV apart from a matched one.
+        assert matched_modalities(SEARCH_HEADER) == []
+
+    def test_case_is_normalised(self):
+        assert matched_modalities(["MRN", "US_accession_number"]) == ["us"]
+
+    def test_repeats_collapse(self):
+        header = ["us_accession_number", "us_accession_number"]
+        assert matched_modalities(header) == ["us"]
+
+
 class TestReadExamPairs:
     """Choosing exams from either CSV this package writes."""
 
-    def test_matched_csv_defaults_to_ultrasound(self, tmp_path):
+    def test_matched_csv_defaults_to_every_modality(self, tmp_path):
         path = write_csv(
             tmp_path / "matched.csv",
             [["A1", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
             MATCHED_HEADER,
         )
-        assert read_exam_pairs(path) == [("A1", "U1")]
+        assert read_exam_pairs(path) == [("A1", "U1"), ("A1", "C1")]
 
-    def test_matched_csv_ct(self, tmp_path):
+    def test_one_modality(self, tmp_path):
         path = write_csv(
             tmp_path / "matched.csv",
             [["A1", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
             MATCHED_HEADER,
         )
         assert read_exam_pairs(path, "ct") == [("A1", "C1")]
+        assert read_exam_pairs(path, "us") == [("A1", "U1")]
 
-    def test_matched_csv_both(self, tmp_path):
+    def test_comma_separated_selection(self, tmp_path):
+        header = ["mrn", "us_accession_number", "ct_accession_number",
+                  "mr_accession_number"]
+        path = write_csv(tmp_path / "matched.csv", [["A1", "U1", "C1", "M1"]], header)
+        assert read_exam_pairs(path, "us,mr") == [("A1", "U1"), ("A1", "M1")]
+
+    def test_selection_order_is_the_callers(self, tmp_path):
         path = write_csv(
             tmp_path / "matched.csv",
             [["A1", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
             MATCHED_HEADER,
         )
-        assert read_exam_pairs(path, "both") == [("A1", "U1"), ("A1", "C1")]
+        assert read_exam_pairs(path, "ct,us") == [("A1", "C1"), ("A1", "U1")]
 
-    def test_repeated_ct_is_collapsed(self, tmp_path):
+    def test_a_list_is_accepted(self, tmp_path):
+        path = write_csv(
+            tmp_path / "matched.csv",
+            [["A1", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
+            MATCHED_HEADER,
+        )
+        assert read_exam_pairs(path, ["us"]) == [("A1", "U1")]
+
+    def test_modality_beyond_us_and_ct(self, tmp_path):
+        header = ["mrn", "mr_accession_number", "xr_accession_number"]
+        path = write_csv(tmp_path / "matched.csv", [["A1", "M1", "X1"]], header)
+        assert read_exam_pairs(path) == [("A1", "M1"), ("A1", "X1")]
+        assert read_exam_pairs(path, "xr") == [("A1", "X1")]
+
+    def test_repeated_accession_is_collapsed(self, tmp_path):
         # Two ultrasounds before one CT: the CT must be probed once.
         path = write_csv(
             tmp_path / "matched.csv",
@@ -141,11 +195,28 @@ class TestReadExamPairs:
             MATCHED_HEADER,
         )
         assert read_exam_pairs(path, "ct") == [("A1", "C1")]
-        assert read_exam_pairs(path, "both") == [
+        assert read_exam_pairs(path) == [
             ("A1", "U1"),
             ("A1", "C1"),
             ("A1", "U2"),
         ]
+
+    def test_blank_accession_is_skipped(self, tmp_path):
+        # A row pairing only some modalities must not yield an empty lookup.
+        path = write_csv(
+            tmp_path / "matched.csv",
+            [["A1", "U1", "2021-03-02T08:00:00-08:00", ""]],
+            MATCHED_HEADER,
+        )
+        assert read_exam_pairs(path) == [("A1", "U1")]
+
+    def test_row_without_mrn_is_skipped(self, tmp_path):
+        path = write_csv(
+            tmp_path / "matched.csv",
+            [["", "U1", "2021-03-02T08:00:00-08:00", "C1"]],
+            MATCHED_HEADER,
+        )
+        assert read_exam_pairs(path) == []
 
     def test_search_csv_is_detected(self, tmp_path):
         path = write_csv(
@@ -154,6 +225,16 @@ class TestReadExamPairs:
             SEARCH_HEADER,
         )
         assert read_exam_pairs(path) == [("A1", "U1")]
+
+    def test_search_csv_warns_when_modalities_requested(self, tmp_path, caplog):
+        path = write_csv(
+            tmp_path / "accessions.csv",
+            [["A1", "U1", "2021-03-02T08:00:00-08:00", "", "", "US", "12"]],
+            SEARCH_HEADER,
+        )
+        with caplog.at_level("WARNING"):
+            assert read_exam_pairs(path, "ct") == [("A1", "U1")]
+        assert "pairs no modalities" in caplog.text
 
     def test_same_accession_under_two_mrns_is_kept(self, tmp_path):
         # An accession number is only unique within a patient.
@@ -165,12 +246,24 @@ class TestReadExamPairs:
             ],
             MATCHED_HEADER,
         )
-        assert read_exam_pairs(path) == [("A1", "U1"), ("A2", "U1")]
+        assert read_exam_pairs(path, "us") == [("A1", "U1"), ("A2", "U1")]
 
-    def test_rejects_unknown_which(self, tmp_path):
+    def test_rejects_a_modality_the_csv_lacks(self, tmp_path):
         path = write_csv(tmp_path / "matched.csv", [], MATCHED_HEADER)
-        with pytest.raises(ValueError, match="Unknown which"):
-            read_exam_pairs(path, "everything")
+        with pytest.raises(ValueError, match="no column\\(s\\) for mr"):
+            read_exam_pairs(path, "mr")
+
+    def test_rejects_an_empty_selection(self, tmp_path):
+        path = write_csv(tmp_path / "matched.csv", [], MATCHED_HEADER)
+        with pytest.raises(ValueError, match="No modality requested"):
+            read_exam_pairs(path, ",")
+
+    def test_matched_csv_without_mrn_raises(self, tmp_path):
+        path = write_csv(
+            tmp_path / "matched.csv", [], ["us_accession_number", "ct_accession_number"]
+        )
+        with pytest.raises(ValueError, match="missing required column: mrn"):
+            read_exam_pairs(path)
 
 
 class TestWriteProbeCsv:
@@ -212,7 +305,7 @@ class TestProbeSeries:
             ]
         }
         out = tmp_path / "probe.csv"
-        probe_series(self._matched(tmp_path), output=out)
+        probe_series(self._matched(tmp_path), output=out, modalities="us")
         rows = read_rows(out)
         assert [r["series_description"] for r in rows] == ["RUQ", "LUQ"]
         assert rows[0]["mrn"] == "A1"
@@ -228,7 +321,7 @@ class TestProbeSeries:
             ]
         }
         out = tmp_path / "probe.csv"
-        probe_series(self._matched(tmp_path), output=out, summary=True)
+        probe_series(self._matched(tmp_path), output=out, summary=True, modalities="us")
         (row,) = read_rows(out)
         assert row["n_series"] == "2"
         assert row["total_series_image_count"] == "8"
@@ -239,25 +332,25 @@ class TestProbeSeries:
             "U1": [{"description": "RUQ"}, {"description": "LUQ", "imageCount": 5}]
         }
         out = tmp_path / "probe.csv"
-        probe_series(self._matched(tmp_path), output=out, summary=True)
+        probe_series(self._matched(tmp_path), output=out, summary=True, modalities="us")
         (row,) = read_rows(out)
         assert row["total_series_image_count"] == "5"
 
     def test_never_downloads(self, tmp_path, stub_client):
-        probe_series(self._matched(tmp_path), output=tmp_path / "probe.csv")
+        probe_series(self._matched(tmp_path), output=tmp_path / "probe.csv", modalities="us")
         client = stub_client.instances[0]
         assert client.downloads == []
         assert len(client.series_calls) == 1
 
     def test_searches_on_mrn_and_accession_together(self, tmp_path, stub_client):
-        probe_series(self._matched(tmp_path), output=tmp_path / "probe.csv")
+        probe_series(self._matched(tmp_path), output=tmp_path / "probe.csv", modalities="us")
         (search,) = stub_client.instances[0].searches
         assert search == {"accession": "U1", "mrn": "A1"}
 
     def test_exam_matching_nothing_is_skipped(self, tmp_path, stub_client):
         stub_client.missing = {"U1"}
         out = tmp_path / "probe.csv"
-        probe_series(self._matched(tmp_path), output=out)
+        probe_series(self._matched(tmp_path), output=out, modalities="us")
         assert read_rows(out) == []
 
     def test_a_failure_does_not_end_the_run(self, tmp_path, stub_client):
@@ -277,6 +370,7 @@ class TestProbeSeries:
                 ],
             ),
             output=out,
+            modalities="us",
         )
         rows = read_rows(out)
         assert [r["accession_number"] for r in rows] == ["U2"]
@@ -291,6 +385,7 @@ class TestProbeSeries:
                 ],
             ),
             output=tmp_path / "probe.csv",
+            modalities="us",
             n=1,
         )
         assert len(stub_client.instances[0].searches) == 1

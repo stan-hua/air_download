@@ -16,27 +16,37 @@ Each exam costs two plain queries and no image transfer, since
 ``/secure/search/series`` sits outside the download handshake. No project or
 anonymization profile is needed, because nothing is retrieved.
 
+A matched CSV names one ``<modality>_accession_number`` column per modality
+it pairs, so the modalities are read off its header rather than assumed. Any
+pairing works, not only ultrasound and CT.
+
 Examples
 --------
-Summarise the ultrasounds of a matched cohort, one row per exam::
+Summarise every exam of a matched cohort, one row per exam::
 
     pixi run probe --input_csv matched_us_ct.csv --summary \
-        --output probe_us.csv --cred_path ~/air_login.txt
+        --output probe.csv --cred_path ~/air_login.txt
 
 List every series of every exam in a search result::
 
     pixi run probe --input_csv output-us_ed_bedside/accessions.csv \
         --output probe_series.csv --cred_path ~/air_login.txt
 
-Check a couple of CTs before running the whole cohort::
+Probe one side of the pairing only, a couple of exams at a time::
 
-    pixi run probe --input_csv matched_us_ct.csv --which ct --n 2 \
+    pixi run probe --input_csv matched_us_ct.csv --modalities ct --n 2 \
+        --cred_path ~/air_login.txt
+
+Pick two modalities out of a wider pairing::
+
+    pixi run probe --input_csv matched_us_ct_mr.csv --modalities us,mr \
         --cred_path ~/air_login.txt
 """
 
 # Standard libraries
 import csv
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,21 +56,19 @@ from tqdm import tqdm
 
 # Custom libraries
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
-from air_download.cohort import read_matched_pairs
 from air_download.utils import configure_logging, read_accession_pairs
 
 logger = logging.getLogger(__name__)
 
-# Which exam of a matched pair to probe. Ignored for a search-result CSV,
-# which holds one accession per row.
-WHICH_CHOICES = ("us", "ct", "both")
-DEFAULT_WHICH = "us"
+# A matched CSV names one accession column per modality it pairs, so the
+# modalities are read off the header rather than hard-coded. This is what
+# keeps the command working for pairings beyond ultrasound and CT.
+_ACCESSION_COLUMN = re.compile(r"^(?P<modality>.+)_accession_number$")
 
-_WHICH_COLUMNS = {
-    "us": ("us_accession_number",),
-    "ct": ("ct_accession_number",),
-    "both": ("us_accession_number", "ct_accession_number"),
-}
+# Probe every modality the CSV declares. Ignored for a search-result CSV,
+# which holds one unprefixed accession per row.
+ALL_MODALITIES = "all"
+DEFAULT_MODALITIES = ALL_MODALITIES
 
 PER_SERIES_HEADER = [
     "mrn",
@@ -90,24 +98,82 @@ SUMMARY_HEADER = [
 _DESCRIPTION_SEPARATOR = " | "
 
 
+def matched_modalities(fieldnames: list[str]) -> list[str]:
+    """Return the modalities a matched CSV's header declares.
+
+    A matched CSV names its accession columns ``<modality>_accession_number``,
+    so the pairing's modalities can be read off the header. An unprefixed
+    ``accession_number`` does not match, which is what tells a search-result
+    CSV apart from a matched one.
+
+    Parameters
+    ----------
+    fieldnames : list of str
+        The CSV's header row.
+
+    Returns
+    -------
+    list of str
+        The modalities found, lowercased, in header order and without
+        duplicates. Empty for a CSV that pairs nothing.
+    """
+    found: list[str] = []
+    for name in fieldnames:
+        match = _ACCESSION_COLUMN.match((name or "").strip())
+        if match is None:
+            continue
+        modality = match.group("modality").lower()
+        if modality not in found:
+            found.append(modality)
+    return found
+
+
+def _resolve_modalities(requested: Any, available: list[str]) -> list[str]:
+    """Narrow the modalities a CSV declares to the ones asked for."""
+    if isinstance(requested, (list, tuple)):
+        names = [str(m).strip().lower() for m in requested]
+    else:
+        names = [m.strip().lower() for m in str(requested).split(",")]
+    names = [m for m in names if m]
+
+    if not names:
+        raise ValueError(
+            f"No modality requested. Pass '{ALL_MODALITIES}' or any of: "
+            f"{', '.join(available)}."
+        )
+    if names == [ALL_MODALITIES]:
+        return list(available)
+
+    unknown = [m for m in names if m not in available]
+    if unknown:
+        raise ValueError(
+            f"The CSV has no column(s) for {', '.join(unknown)}. It pairs: "
+            f"{', '.join(available)}. Expected a "
+            f"'<modality>_accession_number' column per modality."
+        )
+    # Preserve the caller's order, minus repeats.
+    return list(dict.fromkeys(names))
+
+
 def read_exam_pairs(
-    input_csv: str | Path, which: str = DEFAULT_WHICH
+    input_csv: str | Path, modalities: Any = DEFAULT_MODALITIES
 ) -> list[tuple[str, str]]:
     """Read the (MRN, accession number) pairs to probe.
 
-    Accepts either CSV this package writes: the matched pairs from
-    ``air_match``, or the search results from ``--search-only``. The two are
-    told apart by their header. Both identifiers are always carried together,
-    since an accession number alone can belong to more than one patient.
+    Accepts either CSV this package writes: a matched CSV pairing any set of
+    modalities, or the search results from ``--search-only``. The two are told
+    apart by their header. Both identifiers are always carried together, since
+    an accession number alone can belong to more than one patient.
 
     Parameters
     ----------
     input_csv : str or Path
-        A matched CSV (``us_accession_number`` in its header) or a
-        search-result CSV (``accession_number``).
-    which : str, optional
-        For a matched CSV, whether to probe the ultrasound, the CT, or both.
-        Ignored for a search-result CSV.
+        A matched CSV (one ``<modality>_accession_number`` column per paired
+        modality) or a search-result CSV (an unprefixed ``accession_number``).
+    modalities : str or list, optional
+        Which of a matched CSV's modalities to probe: ``all`` (the default),
+        or a comma-separated selection such as ``us,ct``. Ignored for a
+        search-result CSV.
 
     Returns
     -------
@@ -117,34 +183,64 @@ def read_exam_pairs(
     Raises
     ------
     ValueError
-        If ``which`` is not recognised, or the CSV lacks the columns its
-        reader requires.
+        If a requested modality is not in the CSV, or the CSV lacks ``mrn``.
     """
-    if which not in WHICH_CHOICES:
-        raise ValueError(
-            f"Unknown which '{which}'. Choose one of: {', '.join(WHICH_CHOICES)}."
-        )
-
     input_csv = Path(input_csv)
     with open(input_csv, newline="") as f:
         # DictReader consumes only the header line.
         fieldnames = csv.DictReader(f).fieldnames or []
 
-    if "us_accession_number" not in fieldnames:
+    available = matched_modalities(fieldnames)
+    if not available:
+        if str(modalities).strip().lower() != ALL_MODALITIES:
+            logger.warning(
+                "%s pairs no modalities, so it holds one accession per row "
+                "and every row is probed; the requested modalities are "
+                "ignored.",
+                input_csv,
+            )
         return read_accession_pairs(input_csv)
+
+    wanted = _resolve_modalities(modalities, available)
+    if "mrn" not in fieldnames:
+        raise ValueError(
+            f"{input_csv} is missing required column: mrn. Found: "
+            f"{', '.join(fieldnames) if fieldnames else '(no header row)'}."
+        )
 
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for row in read_matched_pairs(input_csv):
-        for column in _WHICH_COLUMNS[which]:
-            pair = (row["mrn"], row[column])
-            if pair in seen:
-                continue
-            seen.add(pair)
-            pairs.append(pair)
+    incomplete = 0
+    with open(input_csv, newline="") as f:
+        for row in csv.DictReader(f):
+            mrn = (row.get("mrn") or "").strip()
+            for modality in wanted:
+                accession = (
+                    row.get(f"{modality}_accession_number") or ""
+                ).strip()
+                if not mrn or not accession:
+                    incomplete += 1
+                    continue
+                pair = (mrn, accession)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                pairs.append(pair)
 
+    if incomplete:
+        logger.warning(
+            "Skipped %d entr(ies) in %s missing an MRN or accession number. "
+            "Both are required: an accession number alone can match more "
+            "than one patient.",
+            incomplete,
+            input_csv,
+        )
     logger.info(
-        "Read %d unique exam(s) to probe from %s (%s).", len(pairs), input_csv, which
+        "Read %d unique exam(s) to probe from %s (%s of: %s).",
+        len(pairs),
+        input_csv,
+        ", ".join(wanted),
+        ", ".join(available),
     )
     return pairs
 
@@ -236,7 +332,7 @@ def write_probe_csv(
 def probe_series(
     input_csv: str | Path,
     output: str | Path = "probe_series.csv",
-    which: str = DEFAULT_WHICH,
+    modalities: Any = DEFAULT_MODALITIES,
     summary: bool = False,
     n: int | None = None,
     url: str | None = None,
@@ -256,8 +352,9 @@ def probe_series(
         Matched CSV from ``air_match``, or a search-result ``accessions.csv``.
     output : str or Path, optional
         Where to write the results.
-    which : str, optional
-        For a matched CSV, whether to probe the ultrasound, the CT, or both.
+    modalities : str or list, optional
+        Which of a matched CSV's modalities to probe: ``all`` (the default),
+        or a comma-separated selection such as ``us,ct``.
     summary : bool, optional
         Write one row per exam (series count, total objects, joined
         descriptions) rather than one row per series.
@@ -277,11 +374,11 @@ def probe_series(
     Raises
     ------
     ValueError
-        If ``n`` is less than 1, or ``which`` is not recognised.
+        If ``n`` is less than 1, or a requested modality is not in the CSV.
     """
     configure_logging(verbose, quiet)
 
-    pairs = read_exam_pairs(input_csv, which)
+    pairs = read_exam_pairs(input_csv, modalities)
 
     if n is not None:
         if n < 1:

@@ -516,14 +516,18 @@ Drop `--summary` for one row per series, adding `series_number`, `series_descrip
 
 It accepts either CSV this tool writes, told apart by their header:
 
-- a **matched CSV** from `pixi run match` — `--which us` (default), `ct`, or `both`
-- a **search-result** `accessions.csv` — every row is probed
+- a **matched CSV** from `pixi run match` — one accession column per paired modality
+- a **search-result** `accessions.csv` — an unprefixed `accession_number`, every row probed
+
+A matched CSV declares its modalities in its header, as `<modality>_accession_number`, so nothing about ultrasound or CT is baked in — a pairing of `mr_accession_number` and `xr_accession_number` works the same way. `--modalities` selects among whatever the file declares, and defaults to `all`:
 
 ```bash
-# Check a couple of CTs before committing to the whole cohort
-pixi run probe --input_csv matched_us_ct.csv --which ct --n 2 \
-               --cred_path ~/air_login.txt
+pixi run probe --input_csv matched_us_ct.csv                          # us and ct
+pixi run probe --input_csv matched_us_ct.csv --modalities ct --n 2    # just the CTs
+pixi run probe --input_csv matched_us_ct_mr.csv --modalities us,mr    # two of three
 ```
+
+Asking for a modality the file does not pair fails immediately, naming the ones it does. On a search-result CSV there are no modalities to choose between, so `--modalities` is ignored with a warning rather than silently.
 
 The counts and descriptions it reports are the whole of what the API exposes per series — see [What the API reports per series](#what-the-api-reports-per-series). Treat them as evidence, not ground truth.
 
