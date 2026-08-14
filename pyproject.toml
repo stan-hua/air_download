@@ -29,6 +29,7 @@ air_download = "air_download.cli:cli"
 air_match = "air_download.us_ct.match:cli"
 air_cohort = "air_download.us_ct.cohort:cli"
 air_frames = "air_download.frames:cli"
+air_convert = "air_download.us_ct.convert:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -89,5 +90,5 @@ list-profiles = { cmd = "air_download -lpf", description = "List available anony
 match = { cmd = "air_match", description = "Match ED ultrasound exams to the CTs that followed" }
 download-cohort = { cmd = "air_cohort", description = "Download a matched US-CT cohort into per-patient visit folders" }
 frames = { cmd = "air_frames", description = "Count frames in downloaded DICOMs, and prune to the multi-frame clips" }
-convert = { cmd = "python -m air_download.us_ct.convert", description = "Convert a downloaded cohort into ML-loadable arrays" }
+convert = { cmd = "air_convert", description = "Convert a downloaded cohort into NIfTI volumes and Zarr clips" }
 test = { cmd = "pytest", description = "Run the test suite" }
