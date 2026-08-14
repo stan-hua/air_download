@@ -565,6 +565,8 @@ P0002     A0003                            2          0          22            2
 
 `series_uid` and `sop_instance_uid` are not written either. They name no patient, but they are direct keys back into the PACS. The cost is that series grouping is now by `series_description` and `modality`, which merges two genuinely different series that share a description.
 
+**`--min_frames` applies to ultrasound only.** One CT object is one slice, so judging a CT on frame count rejects every slice and `prune` then deletes the whole series. `--min_frames_modalities` (default `US`) names the modalities the threshold means anything for; everything else passes untouched, and an instance with no modality passes too, since nothing that cannot be classified should be discarded. Pass an empty string to apply it to all.
+
 `--min_frames` only fills in `passes` and the summary counts — **every instance is reported either way**, so you can look at the distribution before committing to a threshold. A run warns when any archive has `n_passing = 0`, naming the count rather than the archives; the CSV has the rows.
 
 Once the cut-off looks right, prune into a **new** tree. The source archives are never modified:

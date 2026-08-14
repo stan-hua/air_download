@@ -18,13 +18,19 @@ download that produced the files.
 Neither command modifies its input. ``prune`` writes a new tree and leaves
 the source archives untouched.
 
+The threshold applies to ultrasound only, by default. One CT object is one
+slice, so a threshold applied to a CT rejects every slice and takes the whole
+series with it; ``min_frames_modalities`` names the modalities it means
+anything for.
+
 Identifiers in both CSVs are read from the **path**, not from the DICOM
 header. ``PatientID`` and ``AccessionNumber`` hold the real values whenever a
 download ran without an anonymization profile, so reading them would write
 real identifiers into a file. Members are reported by index rather than by
 name for the same reason: AIR names them ``<studyUid>/<seriesUid>/<sopUid>``,
-which would reintroduce the UIDs this module deliberately stopped writing. A cohort from ``air_cohort`` is already laid out
-as ``P0001/visit-01/us/A0001.zip``; join back to real patients through its
+which would reintroduce the UIDs this module deliberately stopped writing. A
+cohort from ``air_cohort`` is already laid out as
+``P0001/visit-01/us/A0001.zip``; join back to real patients through its
 crosswalk. Anything outside that layout leaves the two columns empty rather
 than guessing.
 
@@ -68,6 +74,11 @@ logger = logging.getLogger(__name__)
 
 # A cine clip worth keeping, for an ED FAST. Stills come back as 1 frame.
 DEFAULT_MIN_FRAMES = 60
+
+# The frame threshold only applies to modalities where one object holds many
+# frames. A CT is a stack of single-frame objects, so applying it there would
+# reject every slice and take the whole series with it.
+DEFAULT_MIN_FRAMES_MODALITIES = "US"
 
 # Identifiers come from the path, never the DICOM header: PatientID and
 # AccessionNumber hold the real values whenever no anonymization profile was
@@ -206,11 +217,53 @@ def _frame_count(dataset: Any) -> int:
         return 1
 
 
+def parse_modalities(value: str) -> frozenset[str]:
+    """Parse a comma-separated modality list into an upper-cased set."""
+    return frozenset(part.strip().upper() for part in value.split(",") if part.strip())
+
+
+def instance_passes(
+    dataset: Any, min_frames: int, modalities: frozenset[str]
+) -> bool:
+    """Report whether an instance clears the frame threshold.
+
+    The threshold only means something where one object holds many frames.
+    A CT is a stack of single-frame objects, so applying it there would
+    reject every slice and drop the whole series -- which is why the check
+    is limited to ``modalities`` and everything else passes untouched. An
+    instance whose modality is missing passes too: never discard what cannot
+    be classified.
+
+    Parameters
+    ----------
+    dataset : pydicom.Dataset
+        The parsed header.
+    min_frames : int
+        Frames at or above which an instance counts as a clip worth keeping.
+    modalities : frozenset of str
+        Modalities the threshold applies to. Empty means every modality.
+
+    Returns
+    -------
+    bool
+        True when the instance is kept.
+    """
+    if not modalities:
+        return _frame_count(dataset) >= min_frames
+    modality = str(getattr(dataset, "Modality", "") or "").upper()
+    if modality not in modalities:
+        return True
+    return _frame_count(dataset) >= min_frames
+
+
 def _instance_row(
-    archive: str, member_index: int, dataset: Any, min_frames: int
+    archive: str,
+    member_index: int,
+    dataset: Any,
+    min_frames: int,
+    modalities: frozenset[str],
 ) -> dict[str, Any]:
     """Build one CSV row describing a DICOM instance."""
-    n_frames = _frame_count(dataset)
     anon_mrn, anon_accession = parse_anon_ids(archive)
     return {
         "archive": archive,
@@ -219,10 +272,10 @@ def _instance_row(
         "anon_accession_number": anon_accession,
         "series_description": str(getattr(dataset, "SeriesDescription", "") or ""),
         "modality": str(getattr(dataset, "Modality", "") or ""),
-        "n_frames": n_frames,
+        "n_frames": _frame_count(dataset),
         "rows": getattr(dataset, "Rows", "") or "",
         "columns": getattr(dataset, "Columns", "") or "",
-        "passes": n_frames >= min_frames,
+        "passes": instance_passes(dataset, min_frames, modalities),
     }
 
 
@@ -280,6 +333,7 @@ def inspect(
     input: str | Path,
     output: str | Path = "frames.csv",
     min_frames: int = DEFAULT_MIN_FRAMES,
+    min_frames_modalities: str = DEFAULT_MIN_FRAMES_MODALITIES,
     verbose: bool = False,
     quiet: bool = False,
 ) -> None:
@@ -302,6 +356,9 @@ def inspect(
     min_frames : int, optional
         Frame count at or above which an instance counts as a clip worth
         keeping.
+    min_frames_modalities : str, optional
+        Comma-separated modalities the threshold applies to. Every other
+        modality passes untouched. Pass an empty string to apply it to all.
     verbose : bool, optional
         Log at DEBUG.
     quiet : bool, optional
@@ -321,8 +378,9 @@ def inspect(
     if not root.exists():
         raise FileNotFoundError(f"{root} does not exist.")
 
+    modalities = parse_modalities(min_frames_modalities)
     rows = [
-        _instance_row(archive, index, dataset, min_frames)
+        _instance_row(archive, index, dataset, min_frames, modalities)
         for archive, _member, index, dataset in iter_instances(root)
     ]
 
@@ -346,13 +404,18 @@ def inspect(
             len(unlabelled),
             len(summaries),
         )
+    exempt = sum(
+        1 for r in rows if modalities and r["modality"].upper() not in modalities
+    )
     logger.info(
-        "Read %d instance(s) across %d archive(s). %d have >=%d frames. "
-        "Written to %s and %s.",
+        "Read %d instance(s) across %d archive(s). %d pass: >=%d frames, or "
+        "any of the %d instance(s) the threshold does not apply to. Written "
+        "to %s and %s.",
         len(rows),
         len(summaries),
         passing,
         min_frames,
+        exempt,
         written,
         exams_written,
     )
@@ -374,6 +437,7 @@ def prune(
     input: str | Path,
     output_dir: str | Path,
     min_frames: int = DEFAULT_MIN_FRAMES,
+    min_frames_modalities: str = DEFAULT_MIN_FRAMES_MODALITIES,
     verbose: bool = False,
     quiet: bool = False,
 ) -> None:
@@ -392,6 +456,10 @@ def prune(
         Root of the new tree. Must not be inside ``input``.
     min_frames : int, optional
         Keep instances with at least this many frames.
+    min_frames_modalities : str, optional
+        Comma-separated modalities the threshold applies to. Every other
+        modality is kept whole -- without this a CT, being a stack of
+        single-frame objects, would lose every slice. Empty applies it to all.
     verbose : bool, optional
         Log at DEBUG.
     quiet : bool, optional
@@ -419,10 +487,11 @@ def prune(
             f"pruned tree somewhere else so the run cannot read its own output."
         )
 
+    modalities = parse_modalities(min_frames_modalities)
     keep: dict[str, set[str]] = defaultdict(set)
     dropped = 0
     for archive, member, _index, dataset in iter_instances(root):
-        if _frame_count(dataset) >= min_frames:
+        if instance_passes(dataset, min_frames, modalities):
             keep[archive].add(member)
         else:
             dropped += 1

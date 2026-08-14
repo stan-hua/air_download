@@ -204,6 +204,83 @@ class TestInspect:
             inspect(tmp_path / "nope")
 
 
+class TestModalityExemption:
+    """The frame threshold only means something where an object holds many."""
+
+    def test_a_ct_slice_passes_below_the_threshold(self, tmp_path):
+        # One CT object is one slice. Judging it on frames rejects every
+        # slice, and prune then deletes the whole series.
+        root = tmp_path / "cohort"
+        make_dicom(root / "loose" / "CT0000.dcm", n_frames=1, modality="CT")
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+        (row,) = read_rows(out)
+        assert row["passes"] == "True"
+
+    def test_a_short_ultrasound_clip_still_fails(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_dicom(root / "loose" / "US0000.dcm", n_frames=5, modality="US")
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+        (row,) = read_rows(out)
+        assert row["passes"] == "False"
+
+    def test_an_unknown_modality_passes(self, tmp_path):
+        # Never discard what cannot be classified.
+        root = tmp_path / "cohort"
+        make_dicom(root / "loose" / "X0000.dcm", n_frames=1, modality="")
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+        (row,) = read_rows(out)
+        assert row["passes"] == "True"
+
+    def test_an_empty_modality_list_applies_the_threshold_to_all(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_dicom(root / "loose" / "CT0000.dcm", n_frames=1, modality="CT")
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60, min_frames_modalities="")
+        (row,) = read_rows(out)
+        assert row["passes"] == "False"
+
+    def test_the_modality_list_is_case_insensitive(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_dicom(root / "loose" / "US0000.dcm", n_frames=5, modality="US")
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60, min_frames_modalities=" us ")
+        (row,) = read_rows(out)
+        assert row["passes"] == "False"
+
+    def test_prune_keeps_a_ct_whole(self, tmp_path):
+        # The bug this exists to stop: prune deleting every CT in a cohort.
+        root = tmp_path / "cohort"
+        ct = root / "P0001" / "visit-01" / "ct" / "A0002.zip"
+        staging = tmp_path / "staging"
+        members = [
+            make_dicom(staging / f"CT{i:04d}.dcm", n_frames=1, modality="CT")
+            for i in range(3)
+        ]
+        ct.parent.mkdir(parents=True)
+        with zipfile.ZipFile(ct, "w") as zf:
+            for member in members:
+                zf.write(member, arcname=member.name)
+
+        prune(root, tmp_path / "pruned", min_frames=60)
+
+        out = tmp_path / "pruned" / "P0001" / "visit-01" / "ct" / "A0002.zip"
+        assert out.exists()
+        with zipfile.ZipFile(out) as zf:
+            assert len(zf.namelist()) == 3
+
+    def test_prune_still_drops_a_short_ultrasound_clip(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_archive(root / "P0001" / "visit-01" / "us" / "A0001.zip", [148, 5])
+        prune(root, tmp_path / "pruned", min_frames=60)
+        with zipfile.ZipFile(
+            tmp_path / "pruned" / "P0001" / "visit-01" / "us" / "A0001.zip"
+        ) as zf:
+            assert len(zf.namelist()) == 1
+
+
 class TestAnonColumns:
     """Identifiers come from the path. The header is never read for one."""
 
