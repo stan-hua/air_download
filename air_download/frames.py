@@ -21,7 +21,9 @@ the source archives untouched.
 Identifiers in both CSVs are read from the **path**, not from the DICOM
 header. ``PatientID`` and ``AccessionNumber`` hold the real values whenever a
 download ran without an anonymization profile, so reading them would write
-real identifiers into a file. A cohort from ``air_cohort`` is already laid out
+real identifiers into a file. Members are reported by index rather than by
+name for the same reason: AIR names them ``<studyUid>/<seriesUid>/<sopUid>``,
+which would reintroduce the UIDs this module deliberately stopped writing. A cohort from ``air_cohort`` is already laid out
 as ``P0001/visit-01/us/A0001.zip``; join back to real patients through its
 crosswalk. Anything outside that layout leaves the two columns empty rather
 than guessing.
@@ -73,7 +75,7 @@ DEFAULT_MIN_FRAMES = 60
 # UIDs are gone for the same reason -- they are keys back into the PACS.
 FRAME_CSV_HEADER = [
     "archive",
-    "member",
+    "member_index",
     "anon_mrn",
     "anon_accession_number",
     "series_description",
@@ -124,12 +126,19 @@ def _read_header(data: bytes) -> Any | None:
         return None
 
 
-def iter_instances(root: Path) -> Iterator[tuple[str, str, Any]]:
-    """Yield ``(archive, member, dataset)`` for every DICOM instance under root.
+def iter_instances(root: Path) -> Iterator[tuple[str, str, int, Any]]:
+    """Yield ``(archive, member, member_index, dataset)`` for every instance.
 
     Handles both shapes this package produces: ``.zip`` archives as
     downloaded, and loose files already extracted. For a loose file the
     "archive" is its parent directory, so an exam stays grouped either way.
+
+    ``member_index`` is the member's position in ``ZipFile.namelist()``, or
+    for a loose tree its position in the parent directory's sorted listing.
+    It counts skipped members too, so it stays a usable index back into the
+    archive. Only the index reaches the CSV: an AIR download names members
+    ``<studyUid>/<seriesUid>/<sopUid>.dcm``, so writing the name would put
+    the very UIDs this module stopped reporting straight back into a column.
 
     Parameters
     ----------
@@ -139,7 +148,7 @@ def iter_instances(root: Path) -> Iterator[tuple[str, str, Any]]:
     Yields
     ------
     tuple
-        The archive label, the member name within it, and the parsed header.
+        The archive label, the member name, its index, and the parsed header.
     """
     root = Path(root)
     archives = [root] if root.is_file() else sorted(root.rglob("*.zip"))
@@ -154,28 +163,33 @@ def iter_instances(root: Path) -> Iterator[tuple[str, str, Any]]:
         label = str(archive.relative_to(root) if root.is_dir() else archive.name)
         try:
             with zipfile.ZipFile(archive) as zf:
-                for name in zf.namelist():
+                for index, name in enumerate(zf.namelist()):
                     if _is_skippable(name):
                         continue
                     dataset = _read_header(zf.read(name))
                     if dataset is None:
                         unreadable += 1
                         continue
-                    yield label, name, dataset
+                    yield label, name, index, dataset
         except (zipfile.BadZipFile, OSError):
             logger.error(
                 "An archive could not be opened and was skipped; re-download "
                 "it to include it."
             )
 
+    # Position within the parent's sorted listing; `loose` is already sorted,
+    # so a per-directory counter reproduces it.
+    seen_in_dir: dict[Path, int] = {}
     for path in tqdm(loose, desc="Reading files", disable=not loose):
+        index = seen_in_dir.get(path.parent, 0)
+        seen_in_dir[path.parent] = index + 1
         if _is_skippable(path.name):
             continue
         dataset = _read_header(path.read_bytes())
         if dataset is None:
             unreadable += 1
             continue
-        yield str(path.parent.relative_to(root)), path.name, dataset
+        yield str(path.parent.relative_to(root)), path.name, index, dataset
 
     if unreadable:
         logger.info(
@@ -193,14 +207,14 @@ def _frame_count(dataset: Any) -> int:
 
 
 def _instance_row(
-    archive: str, member: str, dataset: Any, min_frames: int
+    archive: str, member_index: int, dataset: Any, min_frames: int
 ) -> dict[str, Any]:
     """Build one CSV row describing a DICOM instance."""
     n_frames = _frame_count(dataset)
     anon_mrn, anon_accession = parse_anon_ids(archive)
     return {
         "archive": archive,
-        "member": member,
+        "member_index": member_index,
         "anon_mrn": anon_mrn,
         "anon_accession_number": anon_accession,
         "series_description": str(getattr(dataset, "SeriesDescription", "") or ""),
@@ -308,8 +322,8 @@ def inspect(
         raise FileNotFoundError(f"{root} does not exist.")
 
     rows = [
-        _instance_row(archive, member, dataset, min_frames)
-        for archive, member, dataset in iter_instances(root)
+        _instance_row(archive, index, dataset, min_frames)
+        for archive, _member, index, dataset in iter_instances(root)
     ]
 
     if not rows:
@@ -407,7 +421,7 @@ def prune(
 
     keep: dict[str, set[str]] = defaultdict(set)
     dropped = 0
-    for archive, member, dataset in iter_instances(root):
+    for archive, member, _index, dataset in iter_instances(root):
         if _frame_count(dataset) >= min_frames:
             keep[archive].add(member)
         else:

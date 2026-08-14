@@ -107,6 +107,8 @@ The one module that reads local DICOM files rather than the web API — a delibe
 
 `series_uid` and `sop_instance_uid` were dropped too — no patient information, but direct keys back into the PACS. The cost is real and documented: series grouping is now `series_description` + `modality`, which merges two series sharing a description.
 
+The CSV reports `member_index`, not `member`, and that is not cosmetic: an AIR download names members `<studyUid>/<seriesUid>/<sopUid>.dcm`, so writing the name puts both dropped UIDs straight back into a column. `iter_instances` still yields the name (`prune` needs it) but only the index reaches the CSV. The index counts *every* member including skipped ones, so it stays a valid index into `ZipFile.namelist()` — don't "fix" it to count only DICOM instances.
+
 ### Pseudonymisation (`crosswalk.py`)
 
 Three assign-on-first-seen maps, all persisted: `mrn` → `P0001`, `(mrn, accession)` → `A0001`, `(mrn, us_accession, ct_accession)` → `visit-01`. Reloading before assigning anything is what makes a resumed or extended run reuse identifiers instead of filing a patient twice, so **the crosswalk is part of the dataset, not a log**.

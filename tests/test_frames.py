@@ -266,6 +266,59 @@ class TestAnonColumns:
         assert "series_uid" not in FRAME_CSV_HEADER
         assert "sop_instance_uid" not in FRAME_CSV_HEADER
 
+    def test_the_member_name_is_absent(self):
+        # An AIR download names members <studyUid>/<seriesUid>/<sopUid>.dcm,
+        # so writing the name would put the dropped UIDs back in the CSV.
+        assert "member" not in FRAME_CSV_HEADER
+        assert "member_index" in FRAME_CSV_HEADER
+
+    def test_uid_shaped_member_names_never_reach_the_csv(self, tmp_path):
+        root = tmp_path / "cohort"
+        staging = tmp_path / "staging"
+        member = make_dicom(staging / "IMG0000.dcm", n_frames=148)
+        uid_name = (
+            "1.3.6.1.4.1.37209.11111/1.3.6.1.4.1.37209.22222/"
+            "1.3.6.1.4.1.37209.33333.dcm"
+        )
+        archive = root / "P0001" / "visit-01" / "us" / "A0001.zip"
+        archive.parent.mkdir(parents=True)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.write(member, arcname=uid_name)
+
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+        assert "1.3.6.1.4.1.37209" not in out.read_text()
+
+    def test_the_member_index_locates_the_member(self, tmp_path):
+        # The index must be usable against namelist() to be worth writing.
+        root = tmp_path / "cohort"
+        archive = make_archive(
+            root / "P0001" / "visit-01" / "us" / "A0001.zip", [148, 1, 72]
+        )
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+        for row in read_rows(out):
+            assert names[int(row["member_index"])].startswith("IMG")
+
+    def test_the_index_skips_over_a_non_dicom_member(self, tmp_path):
+        # It counts every member, including the ones inspect ignores, or it
+        # would not index back into namelist().
+        root = tmp_path / "cohort"
+        archive = root / "P0001" / "visit-01" / "us" / "A0001.zip"
+        member = make_dicom(tmp_path / "staging" / "IMG0000.dcm", n_frames=148)
+        archive.parent.mkdir(parents=True)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("download_log.xlsx", "not dicom")
+            zf.write(member, arcname="IMG0000.dcm")
+
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+        (row,) = read_rows(out)
+        assert row["member_index"] == "1"
+
     def test_the_real_identifier_columns_are_absent(self):
         for header in (FRAME_CSV_HEADER, EXAM_CSV_HEADER):
             assert "mrn" not in header

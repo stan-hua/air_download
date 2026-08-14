@@ -541,15 +541,17 @@ pixi run download --accessions-csv matched_ct_only.csv -o matched_ct_dicom/ --th
 pixi run frames inspect --input output-cohort/ --output frames.csv --min_frames 60
 ```
 
-`frames.csv`, one row per instance — columns `archive`, `member`, `anon_mrn`, `anon_accession_number`, `series_description`, `modality`, `n_frames`, `rows`, `columns`, `passes`:
+`frames.csv`, one row per instance — columns `archive`, `member_index`, `anon_mrn`, `anon_accession_number`, `series_description`, `modality`, `n_frames`, `rows`, `columns`, `passes`:
 
 ```
-anon_mrn  anon_accession_number  member       series_description  n_frames  passes
-P0001     A0001                  IMG0000.dcm  RUQ                      148  True
-P0001     A0001                  IMG0001.dcm  LUQ                      132  True
-P0001     A0001                  IMG0004.dcm  (still)                    1  False
-P0002     A0003                  IMG0000.dcm  IVC                       22  False
+anon_mrn  anon_accession_number  member_index  series_description  n_frames  passes
+P0001     A0001                             0  RUQ                      148  True
+P0001     A0001                             1  LUQ                      132  True
+P0001     A0001                             4  (still)                    1  False
+P0002     A0003                             0  IVC                       22  False
 ```
+
+`member_index` is the instance's position in the archive's `ZipFile.namelist()`, not its filename. AIR names members `<studyUid>/<seriesUid>/<sopUid>.dcm`, so the name would put the UIDs below straight back into the CSV. To pull one out: `zipfile.ZipFile(archive).namelist()[member_index]`.
 
 `frames_exams.csv`, one row per archive, which is where you spot exams that would drop out of the cohort entirely:
 
