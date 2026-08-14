@@ -18,6 +18,14 @@ download that produced the files.
 Neither command modifies its input. ``prune`` writes a new tree and leaves
 the source archives untouched.
 
+Identifiers in both CSVs are read from the **path**, not from the DICOM
+header. ``PatientID`` and ``AccessionNumber`` hold the real values whenever a
+download ran without an anonymization profile, so reading them would write
+real identifiers into a file. A cohort from ``air_cohort`` is already laid out
+as ``P0001/visit-01/us/A0001.zip``; join back to real patients through its
+crosswalk. Anything outside that layout leaves the two columns empty rather
+than guessing.
+
 Examples
 --------
 Count frames across a downloaded cohort, writing frames.csv and
@@ -51,6 +59,7 @@ from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
 
 # Custom libraries
+from air_download.crosswalk import parse_anon_ids
 from air_download.utils import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -58,15 +67,17 @@ logger = logging.getLogger(__name__)
 # A cine clip worth keeping, for an ED FAST. Stills come back as 1 frame.
 DEFAULT_MIN_FRAMES = 60
 
+# Identifiers come from the path, never the DICOM header: PatientID and
+# AccessionNumber hold the real values whenever no anonymization profile was
+# applied, and writing them here would put them straight into a CSV. The
+# UIDs are gone for the same reason -- they are keys back into the PACS.
 FRAME_CSV_HEADER = [
     "archive",
     "member",
-    "mrn",
-    "accession_number",
-    "series_uid",
+    "anon_mrn",
+    "anon_accession_number",
     "series_description",
     "modality",
-    "sop_instance_uid",
     "n_frames",
     "rows",
     "columns",
@@ -75,8 +86,8 @@ FRAME_CSV_HEADER = [
 
 EXAM_CSV_HEADER = [
     "archive",
-    "mrn",
-    "accession_number",
+    "anon_mrn",
+    "anon_accession_number",
     "n_instances",
     "n_passing",
     "max_frames",
@@ -186,20 +197,14 @@ def _instance_row(
 ) -> dict[str, Any]:
     """Build one CSV row describing a DICOM instance."""
     n_frames = _frame_count(dataset)
-    # Fall back to the archive's stem: an anonymization profile may have
-    # stripped the accession number out of the header.
-    accession = str(getattr(dataset, "AccessionNumber", "") or "") or Path(
-        archive
-    ).stem
+    anon_mrn, anon_accession = parse_anon_ids(archive)
     return {
         "archive": archive,
         "member": member,
-        "mrn": str(getattr(dataset, "PatientID", "") or ""),
-        "accession_number": accession,
-        "series_uid": str(getattr(dataset, "SeriesInstanceUID", "") or ""),
+        "anon_mrn": anon_mrn,
+        "anon_accession_number": anon_accession,
         "series_description": str(getattr(dataset, "SeriesDescription", "") or ""),
         "modality": str(getattr(dataset, "Modality", "") or ""),
-        "sop_instance_uid": str(getattr(dataset, "SOPInstanceUID", "") or ""),
         "n_frames": n_frames,
         "rows": getattr(dataset, "Rows", "") or "",
         "columns": getattr(dataset, "Columns", "") or "",
@@ -228,14 +233,14 @@ def summarise_by_exam(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summaries = []
     for archive, instances in grouped.items():
         frames = [r["n_frames"] for r in instances]
+        # Derived from the path again rather than carried up from the rows,
+        # so both CSVs answer to exactly one rule.
+        anon_mrn, anon_accession = parse_anon_ids(archive)
         summaries.append(
             {
                 "archive": archive,
-                "mrn": next((r["mrn"] for r in instances if r["mrn"]), ""),
-                "accession_number": next(
-                    (r["accession_number"] for r in instances if r["accession_number"]),
-                    "",
-                ),
+                "anon_mrn": anon_mrn,
+                "anon_accession_number": anon_accession,
                 "n_instances": len(instances),
                 "n_passing": sum(1 for r in instances if r["passes"]),
                 "max_frames": max(frames),
@@ -319,6 +324,14 @@ def inspect(
 
     passing = sum(1 for r in rows if r["passes"])
     empty = [s for s in summaries if s["n_passing"] == 0]
+    unlabelled = [s for s in summaries if not s["anon_mrn"]]
+    if unlabelled:
+        logger.info(
+            "%d of %d archive(s) are not in the pseudonymous cohort layout, "
+            "so their anon_mrn and anon_accession_number are empty.",
+            len(unlabelled),
+            len(summaries),
+        )
     logger.info(
         "Read %d instance(s) across %d archive(s). %d have >=%d frames. "
         "Written to %s and %s.",

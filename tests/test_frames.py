@@ -204,17 +204,82 @@ class TestInspect:
             inspect(tmp_path / "nope")
 
 
+class TestAnonColumns:
+    """Identifiers come from the path. The header is never read for one."""
+
+    def test_ids_come_from_the_path_not_the_header(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_archive(
+            root / "P0001" / "visit-01" / "us" / "A0001.zip",
+            [148],
+            accession="SECRET-ACC",
+        )
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+
+        (row,) = read_rows(out)
+        assert row["anon_mrn"] == "P0001"
+        assert row["anon_accession_number"] == "A0001"
+
+    def test_header_identifiers_never_reach_the_csv(self, tmp_path):
+        # make_dicom writes PatientID and AccessionNumber. With no
+        # anonymization profile those are the real values, which is exactly
+        # why nothing reads them any more.
+        root = tmp_path / "cohort"
+        staging = tmp_path / "staging"
+        member = make_dicom(
+            staging / "IMG0000.dcm",
+            n_frames=148,
+            mrn="SECRET-MRN",
+            accession="SECRET-ACC",
+        )
+        archive = root / "P0001" / "visit-01" / "us" / "A0001.zip"
+        archive.parent.mkdir(parents=True)
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.write(member, arcname=member.name)
+
+        out = tmp_path / "frames.csv"
+        inspect(root, output=out, min_frames=60)
+
+        written = out.read_text() + (tmp_path / "frames_exams.csv").read_text()
+        assert "SECRET-MRN" not in written
+        assert "SECRET-ACC" not in written
+
+    def test_a_non_cohort_path_yields_empty_anon_columns(self, tmp_path):
+        # Better empty than a guess: some sites issue real accessions that
+        # look exactly like a generated one.
+        make_archive(tmp_path / "cohort" / "A0001.zip", [148])
+        out = tmp_path / "frames.csv"
+        inspect(tmp_path / "cohort", output=out, min_frames=60)
+
+        (row,) = read_rows(out)
+        assert row["anon_mrn"] == ""
+        assert row["anon_accession_number"] == ""
+
+    def test_a_tree_outside_the_layout_is_reported(self, tmp_path, caplog):
+        make_archive(tmp_path / "cohort" / "US-A.zip", [148])
+        with caplog.at_level("INFO"):
+            inspect(tmp_path / "cohort", output=tmp_path / "frames.csv")
+        assert "not in the pseudonymous cohort layout" in caplog.text
+
+    def test_the_uid_columns_are_absent(self):
+        assert "series_uid" not in FRAME_CSV_HEADER
+        assert "sop_instance_uid" not in FRAME_CSV_HEADER
+
+    def test_the_real_identifier_columns_are_absent(self):
+        for header in (FRAME_CSV_HEADER, EXAM_CSV_HEADER):
+            assert "mrn" not in header
+            assert "accession_number" not in header
+
+
 class TestSummariseByExam:
     """The rollup, independent of any file."""
 
     def test_groups_by_archive(self):
         rows = [
-            {"archive": "a.zip", "mrn": "Z1", "accession_number": "A",
-             "n_frames": 100, "passes": True},
-            {"archive": "a.zip", "mrn": "Z1", "accession_number": "A",
-             "n_frames": 1, "passes": False},
-            {"archive": "b.zip", "mrn": "Z2", "accession_number": "B",
-             "n_frames": 80, "passes": True},
+            {"archive": "a.zip", "n_frames": 100, "passes": True},
+            {"archive": "a.zip", "n_frames": 1, "passes": False},
+            {"archive": "b.zip", "n_frames": 80, "passes": True},
         ]
         summaries = summarise_by_exam(rows)
         assert [s["archive"] for s in summaries] == ["a.zip", "b.zip"]
@@ -222,16 +287,21 @@ class TestSummariseByExam:
         assert summaries[0]["n_passing"] == 1
         assert summaries[0]["total_frames"] == 101
 
-    def test_carries_the_first_non_empty_identifier(self):
+    def test_ids_come_from_the_archive_path(self):
+        # One rule for both CSVs: the path, never a value carried up a row.
         rows = [
-            {"archive": "a.zip", "mrn": "", "accession_number": "",
-             "n_frames": 1, "passes": False},
-            {"archive": "a.zip", "mrn": "Z1", "accession_number": "A",
-             "n_frames": 100, "passes": True},
+            {"archive": "P0001/visit-01/us/A0001.zip", "n_frames": 1,
+             "passes": False},
         ]
         (summary,) = summarise_by_exam(rows)
-        assert summary["mrn"] == "Z1"
-        assert summary["accession_number"] == "A"
+        assert summary["anon_mrn"] == "P0001"
+        assert summary["anon_accession_number"] == "A0001"
+
+    def test_a_non_cohort_archive_has_no_ids(self):
+        rows = [{"archive": "a.zip", "n_frames": 1, "passes": False}]
+        (summary,) = summarise_by_exam(rows)
+        assert summary["anon_mrn"] == ""
+        assert summary["anon_accession_number"] == ""
 
 
 class TestPrune:
@@ -250,9 +320,10 @@ class TestPrune:
         assert source.read_bytes() == before
 
     def test_mirrors_the_directory_layout(self, tmp_path):
-        make_archive(tmp_path / "cohort" / "Z1" / "03-02-21" / "us" / "US-A.zip", [148])
+        layout = Path("P0001") / "visit-01" / "us" / "A0001.zip"
+        make_archive(tmp_path / "cohort" / layout, [148])
         prune(tmp_path / "cohort", tmp_path / "pruned", min_frames=60)
-        assert (tmp_path / "pruned" / "Z1" / "03-02-21" / "us" / "US-A.zip").exists()
+        assert (tmp_path / "pruned" / layout).exists()
 
     def test_archive_with_nothing_qualifying_is_not_written(self, tmp_path, caplog):
         root = tmp_path / "cohort"
