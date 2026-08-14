@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=0.19",
     "tqdm>=4.60",
     "fire>=0.5",
+    "pylibjpeg[libjpeg]>=2.1.0,<3",
 ]
 
 [project.urls]
@@ -62,6 +63,7 @@ matplotlib = ">=3.11.1,<4"
 seaborn = ">=0.13.2,<0.14"
 numpy = ">=2.5.1,<3"
 pydicom = ">=3.0.2,<4"
+nibabel = ">=5.4.2,<6"
 
 # Installs the package itself (and its `air_download` console script) in
 # editable mode, so source edits take effect without a reinstall.
@@ -84,4 +86,5 @@ list-profiles = { cmd = "air_download -lpf", description = "List available anony
 match = { cmd = "air_match", description = "Match ED ultrasound exams to the CTs that followed" }
 download-cohort = { cmd = "air_cohort", description = "Download a matched US-CT cohort into per-patient visit folders" }
 frames = { cmd = "air_frames", description = "Count frames in downloaded DICOMs, and prune to the multi-frame clips" }
+convert = { cmd = "python -m air_download.us_ct.convert", description = "Convert a downloaded cohort into ML-loadable arrays" }
 test = { cmd = "pytest", description = "Run the test suite" }
