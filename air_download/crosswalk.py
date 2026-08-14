@@ -184,6 +184,11 @@ def parse_anon_ids(archive: str | Path) -> tuple[str, str]:
     return anon_mrn, anon_accession
 
 
+def is_anon_mrn(name: str) -> bool:
+    """Report whether a path component is a generated patient identifier."""
+    return bool(_PATIENT_ID_PATTERN.match(name))
+
+
 def _zero_stripped(value: str) -> str:
     """Collapse an identifier to the form Excel would have left it in."""
     return value.lstrip("0") or "0"

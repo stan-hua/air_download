@@ -5,11 +5,16 @@ Description: Download a matched ultrasound-CT cohort into one folder per
              patient and per visit, reading the paired CSV that `air_match`
              writes.
 
-Each row of the matched CSV becomes ``<output>/<mrn>/<MM-DD-YY>/``, holding
-the ultrasound under ``us/`` and the CT under ``ct/``. The visit folder is
-named for the date of the ultrasound, since that is the exam the CT followed.
-The CT is reduced to its thinnest axial series alone, while every series
-of the ultrasound is kept.
+Each row of the matched CSV becomes ``<output>/P0001/visit-01/``, holding the
+ultrasound under ``us/`` and the CT under ``ct/``. Nothing in that path is an
+identifier: patients, exams, and visits are all numbered by
+:mod:`air_download.crosswalk`, which writes the only mapping back to real MRNs
+and accession numbers -- to a file beside the cohort, never inside it. Visits
+count within a patient in the order their ultrasounds happened, so the folder
+still orders a patient's FAST-CT pairs without naming a date.
+
+The CT is reduced to its thinnest axial series alone, while every series of the
+ultrasound is kept.
 
 Examples
 --------
@@ -23,11 +28,18 @@ Download a single pair to verify the layout before scaling up::
     pixi run download-cohort --matched_csv matched_us_ct.csv \
         --output output-cohort/ --cred_path ~/air_login.txt --n 1
 
-Download the whole cohort; exams already present are skipped, so the run
-above is not repeated::
+Download the whole cohort; exams already present are skipped and identifiers
+already assigned are reused, so the run above is not repeated and nobody is
+filed twice::
 
     pixi run download-cohort --matched_csv matched_us_ct.csv \
         --output output-cohort/ --cred_path ~/air_login.txt
+
+Keep the crosswalk somewhere other than beside the cohort::
+
+    pixi run download-cohort --matched_csv matched_us_ct.csv \
+        --output output-cohort/ --crosswalk_csv ~/private/cohort_crosswalk.csv \
+        --cred_path ~/air_login.txt
 """
 
 # Standard libraries
@@ -43,6 +55,12 @@ from tqdm import tqdm
 
 # Custom libraries
 from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
+from air_download.crosswalk import (
+    Crosswalk,
+    default_crosswalk_path,
+    is_anon_mrn,
+    parse_anon_ids,
+)
 from air_download.filters import DEFAULT_AXIAL_PATTERNS
 from air_download.utils import configure_logging, parse_datetime
 
@@ -57,8 +75,9 @@ REQUIRED_COLUMNS = (
     "ct_accession_number",
 )
 
-# One visit per patient per day, so the ultrasound's date names the folder.
-VISIT_DATE_FORMAT = "%m-%d-%y"
+# Read when present, but not required: a matched CSV written before this
+# column existed must still work, as with `us_image_count`.
+OPTIONAL_COLUMNS = ("ct_date_time",)
 
 _UNSAFE_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -79,7 +98,7 @@ def read_matched_pairs(csv_path: Path) -> list[dict[str, str]]:
     -------
     list of dict
         One entry per usable row, in file order, holding the required
-        columns only.
+        columns plus any of :data:`OPTIONAL_COLUMNS` the CSV carried.
 
     Raises
     ------
@@ -106,6 +125,7 @@ def read_matched_pairs(csv_path: Path) -> list[dict[str, str]]:
             if not all(row.values()):
                 incomplete += 1
                 continue
+            row.update({c: (raw.get(c) or "").strip() for c in OPTIONAL_COLUMNS})
             key = tuple(row[c] for c in REQUIRED_COLUMNS)
             if key in seen:
                 continue
@@ -129,45 +149,47 @@ def _safe_component(value: str) -> str:
     return cleaned if cleaned.strip(".") else "_"
 
 
-def visit_folder_name(us_date_time: str, us_accession: str, ct_accession: str) -> str:
-    """Name a visit folder after the date of its ultrasound.
+def sort_rows_for_numbering(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Order rows so each patient's visits are numbered chronologically.
+
+    Patients keep the order they first appear in, so identifiers stay easy to
+    trace back to the source CSV; within a patient, rows are ordered by the
+    ultrasound's timestamp. Rows whose timestamp will not parse sort last and
+    keep their relative order, since there is nothing better to go on.
 
     Parameters
     ----------
-    us_date_time : str
-        The ultrasound's timestamp, ISO 8601.
-    us_accession : str
-        The ultrasound's accession number, used only as a fallback.
-    ct_accession : str
-        The CT's accession number, used only as a fallback.
+    rows : list of dict
+        Rows from :func:`read_matched_pairs`.
 
     Returns
     -------
-    str
-        The date as ``MM-DD-YY``, or the two accession numbers joined when
-        the timestamp cannot be parsed.
+    list of dict
+        The same rows, reordered.
     """
-    try:
-        return parse_datetime(us_date_time or "").strftime(VISIT_DATE_FORMAT)
-    except ValueError:
-        logger.warning(
-            "A row's us_date_time could not be parsed; naming its visit "
-            "folder after the accession pair instead."
-        )
-        return f"{us_accession}_{ct_accession}"
+    first_seen: dict[str, int] = {}
+    for row in rows:
+        first_seen.setdefault(row["mrn"], len(first_seen))
+
+    def key(row: dict[str, str]) -> tuple[int, int, float]:
+        try:
+            when = parse_datetime(row.get("us_date_time") or "")
+        except ValueError:
+            return (first_seen[row["mrn"]], 1, 0.0)
+        return (first_seen[row["mrn"]], 0, when.timestamp())
+
+    return sorted(rows, key=key)
 
 
 def build_visit_paths(
-    output: Path,
-    row: dict[str, str],
-    claimed: dict[Path, tuple[str, str]] | None = None,
+    output: Path, row: dict[str, str], crosswalk: Crosswalk
 ) -> tuple[Path, Path]:
     """Build the ultrasound and CT archive paths for one matched pair.
 
-    Two visits for the same patient on the same day would name the same
-    folder. That is not expected, so rather than merging them silently, a
-    folder already claimed by a different pair gets an index suffix. Pass
-    ``claimed`` to enable that bookkeeping across rows.
+    Every component comes from ``crosswalk``, so no part of the returned path
+    is an identifier. The visit ordinal is unique within its patient by
+    construction, which is why two pairs on the same date can no longer
+    collide.
 
     Parameters
     ----------
@@ -175,40 +197,33 @@ def build_visit_paths(
         Root directory of the cohort.
     row : dict
         A row from :func:`read_matched_pairs`.
-    claimed : dict, optional
-        Maps an already-used visit directory to the accession pair holding
-        it. Updated in place.
+    crosswalk : Crosswalk
+        Assigns and remembers the anonymous identifiers. Required: falling
+        back to real ones is the leak this layout exists to close.
 
     Returns
     -------
     tuple of Path
         The ``us/`` and ``ct/`` archive paths, in that order.
     """
-    mrn = _safe_component(row["mrn"])
-    us_accession = _safe_component(row["us_accession_number"])
-    ct_accession = _safe_component(row["ct_accession_number"])
-    visit = _safe_component(
-        visit_folder_name(row.get("us_date_time", ""), us_accession, ct_accession)
+    mrn = row["mrn"]
+    us_accession = row["us_accession_number"]
+    ct_accession = row["ct_accession_number"]
+
+    anon_mrn = crosswalk.patient_id(mrn)
+    anon_us = crosswalk.exam_id(mrn, us_accession)
+    anon_ct = crosswalk.exam_id(mrn, ct_accession)
+    visit = crosswalk.visit_folder(
+        mrn, us_accession, ct_accession, row.get("us_date_time", "")
     )
-    visit_dir = Path(output) / mrn / visit
 
-    if claimed is not None:
-        pair = (us_accession, ct_accession)
-        candidate, index = visit_dir, 1
-        while claimed.get(candidate, pair) != pair:
-            index += 1
-            candidate = visit_dir.with_name(f"{visit_dir.name}_{index}")
-        if candidate != visit_dir:
-            logger.warning(
-                "A second visit falls on the same date for one patient; "
-                "storing it in a suffixed folder rather than merging the two."
-            )
-        claimed[candidate] = pair
-        visit_dir = candidate
-
+    # Every component is generated, so _safe_component has nothing left to
+    # sanitise. Kept anyway: it is what makes a hostile CSV structurally
+    # unable to escape the output directory.
+    visit_dir = Path(output) / _safe_component(anon_mrn) / _safe_component(visit)
     return (
-        visit_dir / "us" / f"{us_accession}.zip",
-        visit_dir / "ct" / f"{ct_accession}.zip",
+        visit_dir / "us" / f"{_safe_component(anon_us)}.zip",
+        visit_dir / "ct" / f"{_safe_component(anon_ct)}.zip",
     )
 
 
@@ -223,6 +238,7 @@ def _fetch_exam(
     profile: int | None,
     skip_existing: bool,
     downloaded: dict[tuple[str, str], Path],
+    dedupe_key: tuple[str, str],
 ) -> str:
     """Place one exam's archive at ``path``, returning what it took to do so."""
     if path.exists():
@@ -234,7 +250,9 @@ def _fetch_exam(
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    previous = downloaded.get((mrn, accession))
+    # Keyed on the anonymous pair: nothing outliving a single call should
+    # hold a real identifier, not even in memory.
+    previous = downloaded.get(dedupe_key)
     if previous is not None and previous.exists():
         logger.warning(
             "An exam downloaded earlier in this run belongs to a second "
@@ -261,13 +279,29 @@ def _fetch_exam(
         )
         return "failed"
 
-    downloaded[(mrn, accession)] = path
+    downloaded[dedupe_key] = path
     return "downloaded"
+
+
+def _warn_about_a_pre_pseudonym_tree(output: Path) -> None:
+    """Warn when an output directory predates pseudonymous folder names."""
+    if not output.is_dir():
+        return
+    stale = [p for p in output.iterdir() if p.is_dir() and not is_anon_mrn(p.name)]
+    if stale:
+        logger.warning(
+            "%d folder(s) under %s are not named for an anonymous patient ID. "
+            "They were written by an older version, will not be resumed, and "
+            "their names are identifiers. Move or delete them.",
+            len(stale),
+            output,
+        )
 
 
 def download_cohort(
     matched_csv: str | Path,
     output: str | Path,
+    crosswalk_csv: str | Path | None = None,
     n: int | None = None,
     url: str | None = None,
     cred_path: str | Path | None = None,
@@ -282,6 +316,11 @@ def download_cohort(
 ) -> None:
     """Download every matched ultrasound-CT pair into per-visit folders.
 
+    Exams land under ``<output>/P0001/visit-01/{us,ct}/A0001.zip``. No part of
+    that is an identifier; the crosswalk beside the cohort holds the only way
+    back, and re-running reuses what it already assigned, so an interrupted
+    download resumes rather than filing anyone twice.
+
     The ultrasound keeps all of its series; the CT is reduced to its
     thinnest axial series alone, as ``--thinnest-axial`` does. A CT with no
     axial series yields no archive and is counted as failed. A failed exam
@@ -293,10 +332,15 @@ def download_cohort(
     matched_csv : str or Path
         CSV of matched pairs, as written by ``air_match``.
     output : str or Path
-        Root directory to write ``<mrn>/<MM-DD-YY>/{us,ct}/`` under.
+        Root directory to write ``P0001/visit-01/{us,ct}/`` under.
+    crosswalk_csv : str or Path, optional
+        Where the pseudonym mapping lives. Defaults to ``<output>_crosswalk.csv``
+        beside the cohort. A path inside ``output`` is refused, so archiving
+        the cohort cannot ship the key with the lock.
     n : int, optional
-        Download only the first ``n`` rows. Use it to verify one visit
-        before committing to the whole cohort.
+        Download only the first ``n`` visits, ordered as they will be
+        numbered. Use it to verify one visit before committing to the whole
+        cohort.
     url : str, optional
         AIR API URL. Falls back to the credential file or environment.
     cred_path : str or Path, optional
@@ -322,7 +366,23 @@ def download_cohort(
     configure_logging(verbose, quiet)
 
     output = Path(output)
+    crosswalk_path = (
+        Path(crosswalk_csv)
+        if crosswalk_csv is not None
+        else default_crosswalk_path(output)
+    )
+    if crosswalk_path.resolve().is_relative_to(output.resolve()):
+        raise ValueError(
+            f"The crosswalk ({crosswalk_path}) is inside the cohort "
+            f"({output}). It is the only way back to real identifiers, so "
+            f"keeping it there means any copy of the cohort carries the key "
+            f"with the lock. Put it somewhere else."
+        )
+
     rows = read_matched_pairs(Path(matched_csv))
+    # Sort before slicing, so `--n 1` picks the same visit the full run would
+    # number first and the two runs assign identical identifiers.
+    rows = sort_rows_for_numbering(rows)
 
     if n is not None:
         if n < 1:
@@ -340,7 +400,8 @@ def download_cohort(
         logger.warning("No usable rows in %s; nothing to download.", matched_csv)
         return
 
-    claimed: dict[Path, tuple[str, str]] = {}
+    _warn_about_a_pre_pseudonym_tree(output)
+    crosswalk = Crosswalk(crosswalk_path, read_only=dry_run)
     downloaded: dict[tuple[str, str], Path] = {}
     counts = {"downloaded": 0, "skipped": 0, "copied": 0, "failed": 0}
 
@@ -353,18 +414,31 @@ def download_cohort(
     for row in tqdm(
         rows, desc="Downloading visits", total=len(rows), disable=dry_run
     ):
-        us_path, ct_path = build_visit_paths(output, row, claimed)
+        us_path, ct_path = build_visit_paths(output, row, crosswalk)
         exams = (
-            (row["us_accession_number"], us_path, False),
-            (row["ct_accession_number"], ct_path, True),
+            ("us", row["us_accession_number"], row.get("us_date_time", ""), us_path, False),
+            ("ct", row["ct_accession_number"], row.get("ct_date_time", ""), ct_path, True),
         )
 
+        # Recorded before the download, not after: a crosswalk row for an
+        # exam that then failed costs nothing, while an archive on disk with
+        # no way back cannot be repaired.
+        for exam_type, accession, when, path, _thinnest in exams:
+            crosswalk.record(
+                mrn=row["mrn"],
+                accession=accession,
+                exam_type=exam_type,
+                date_time=when,
+                visit_folder=path.parent.parent.name,
+                archive_path=path.relative_to(output),
+            )
+
         if dry_run:
-            for _, path, _thinnest in exams:
+            for _type, _accession, _when, path, _thinnest in exams:
                 print(path)
             continue
 
-        for accession, path, thinnest_axial in exams:
+        for _exam_type, accession, _when, path, thinnest_axial in exams:
             try:
                 outcome = _fetch_exam(
                     client=client,
@@ -377,6 +451,7 @@ def download_cohort(
                     profile=profile,
                     skip_existing=skip_existing,
                     downloaded=downloaded,
+                    dedupe_key=parse_anon_ids(path.relative_to(output)),
                 )
                 counts[outcome] += 1
             except Exception as exc:  # noqa: BLE001 - one bad exam is not fatal
@@ -390,7 +465,12 @@ def download_cohort(
                 logger.debug("Failure detail: %s", exc)
 
     if dry_run:
-        logger.info("Dry run: %d visit(s) would be written under %s.", len(rows), output)
+        logger.info(
+            "Dry run: %d visit(s) would be written under %s, and no crosswalk "
+            "was written.",
+            len(rows),
+            output,
+        )
         return
 
     logger.info(
@@ -401,6 +481,14 @@ def download_cohort(
         counts["skipped"],
         counts["copied"],
         counts["failed"],
+    )
+    logger.info(
+        "%d patient(s) and %d archive(s) are mapped in %s. That file is the "
+        "only way back to real MRNs and accession numbers: keep it out of "
+        "the cohort directory, out of git, and out of anything you share.",
+        crosswalk.n_patients,
+        len(crosswalk),
+        crosswalk_path,
     )
     if counts["failed"]:
         logger.warning(
