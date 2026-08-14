@@ -43,7 +43,8 @@ from air_download.utils import parse_datetime
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_HOURS = 24.0
+# A CT this long after the FAST is still plausibly the same presentation.
+DEFAULT_MAX_HOURS = 48.0
 
 # How to pick one ultrasound when several precede the same CT. "all" keeps
 # every candidate, which is the historical behaviour.

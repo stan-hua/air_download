@@ -120,9 +120,18 @@ class TestMatchExams:
         assert len(match_exams(us, ct)) == 1
 
     def test_just_past_window_does_not_match(self):
+        # State the window rather than inheriting the default, so this keeps
+        # testing the boundary if the default moves.
         us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00")]
         ct = [exam("A1", "C1", "2021-03-03T08:00:01-08:00")]
-        assert match_exams(us, ct) == []
+        assert match_exams(us, ct, max_hours=24) == []
+
+    def test_the_default_window_is_48_hours(self):
+        us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00")]
+        inside = [exam("A1", "C1", "2021-03-04T07:00:00-08:00")]
+        outside = [exam("A1", "C2", "2021-03-04T09:00:00-08:00")]
+        assert len(match_exams(us, inside)) == 1
+        assert match_exams(us, outside) == []
 
     def test_different_patients_do_not_match(self):
         us = [exam("A1", "U1", "2021-03-02T08:00:00-08:00")]
@@ -259,7 +268,7 @@ class TestMultiplePrecedingUltrasounds:
             exam("A1", "U_NEW", "2021-03-02T09:00:00-08:00"),
         ]
         ct = [exam("A1", "C1", "2021-03-02T10:00:00-08:00")]
-        matches = match_exams(us, ct)
+        matches = match_exams(us, ct, max_hours=24)
         assert [m["n_preceding_us"] for m in matches] == [1]
         assert matches[0]["us_accession_number"] == "U_NEW"
 

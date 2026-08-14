@@ -9,7 +9,7 @@ A command-line and Python interface to the AIR web API. Download radiology studi
 [pixi](https://pixi.sh) is the supported way to work from a clone of this repository. Clone it, then let pixi build the environment from the committed lock file:
 
 ```bash
-git clone https://github.com/rauschecker-sugrue-labs/air_download
+git clone https://github.com/stan-hua/air_download
 cd air_download
 pixi install
 ```
@@ -21,7 +21,7 @@ That is the only setup step — the package is installed in editable mode, and e
 To install the tool standalone (outside a clone of this repository):
 
 ```bash
-pip install git+https://github.com/rauschecker-sugrue-labs/air_download
+pip install git+https://github.com/stan-hua/air_download
 ```
 
 (modify URL if the repository lives somewhere other than GitHub)

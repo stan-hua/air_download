@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/rauschecker-sugrue-labs/air_download"
+Repository = "https://github.com/stan-hua/air_download"
 
 [project.scripts]
 air_download = "air_download.cli:cli"
