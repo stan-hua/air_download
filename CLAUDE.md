@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A CLI + Python library wrapping the AIR (Automated Image Retrieval) portal web API, used to batch-download radiology studies (DICOM, delivered as zip archives) from a PACS system. The upstream API contract is vendored at `docs/air_open_api.yaml` — consult it before changing request payloads or adding endpoints.
+A CLI + Python library wrapping the AIR (Automated Image Retrieval) portal web API, used to batch-download radiology studies (DICOM, delivered as zip archives) from a PACS system. The upstream API contract is vendored at `docs/misc/air_open_api.yaml` — consult it before changing request payloads or adding endpoints.
 
 ## Commands
 

@@ -39,7 +39,7 @@ DEFAULT_MAX_BACKOFF = 60.0
 RETRY_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # Modality codes accepted by the `modality` query parameter of
-# /secure/search/query-data-source, per docs/air_open_api.yaml.
+# /secure/search/query-data-source, per docs/misc/air_open_api.yaml.
 MODALITIES = frozenset(
     {
         "AR", "ASMT", "AU", "BDUS", "BI", "BMD", "CR", "CT", "DG", "DOC",

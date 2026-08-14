@@ -235,16 +235,16 @@ clip.attrs["region_box"]           # what was cropped away, and why
 
 ## The commands used to build the reference cohort
 
-The 25-pair verification cohort, end to end. Steps 2 onward are exactly what
-was run; **step 1 is a template** — fill in the search parameters you actually
-used, since only the output directory names survived.
+The 25-pair verification cohort, end to end. `--n` is what keeps it a
+verification cohort: drop it and the same commands download all 5983 pairs
+into the same tree, reusing every identifier already assigned.
 
 ```bash
-# 1. Search each modality into its own directory.  TEMPLATE - confirm the flags.
-pixi run search --mrn ... --modality US --date-start ... --date-end ... \
-    -o output-us_ed_bedside/
-pixi run search --mrn ... --modality CT --date-start ... --date-end ... \
-    -o output-ct_abdomen_pelvis/
+# 1. Search each modality into its own directory, over 2021-2023.
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" \
+    -ds 2021-01-01 -de 2023-12-31 -o output-ct_abdomen_pelvis/
+pixi run search -m US -d "US ED BEDSIDE" \
+    -ds 2021-01-01 -de 2023-12-31 -o output-us_ed_bedside/
 
 # 2. Pair them. 48 hours is the default now, so the flag is optional.
 pixi run match --us_csv output-us_ed_bedside/accessions.csv \
@@ -252,15 +252,17 @@ pixi run match --us_csv output-us_ed_bedside/accessions.csv \
                --output matched_us_ct-48h.csv
 
 # 3. Verify the layout on one pair before committing to the whole cohort.
-pixi run download-cohort --matched_csv matched_us_ct-test.csv \
+pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
     --output cohort-test25/ --dry_run
-pixi run download-cohort --matched_csv matched_us_ct-test.csv \
+pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
     --output cohort-test25/ --cred_path ~/air_login.txt --n 1
 
-# 4. Download the rest. Archives already present are skipped, and identifiers
-#    already assigned are reused, so step 3 is not repeated.
-pixi run download-cohort --matched_csv matched_us_ct-test.csv \
-    --output cohort-test25/ --cred_path ~/air_login.txt
+# 4. Download 25 pairs. Rows are sorted before --n slices them, so this takes
+#    the same 25 the full run would number first. Archives already present are
+#    skipped and identifiers already assigned are reused, so step 3 is not
+#    repeated and nobody is filed twice.
+pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
+    --output cohort-test25/ --cred_path ~/air_login.txt --n 25
 
 # 5. Look at the frame distribution before settling on a threshold.
 pixi run frames inspect --input cohort-test25/ \
