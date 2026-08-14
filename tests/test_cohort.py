@@ -500,14 +500,14 @@ class TestTheCrosswalk:
         out = tmp_path / "out"
 
         download_cohort(matched_csv=csv_path, output=out, n=1)
-        first_run = sorted(p.relative_to(out) for p in out.rglob("*.zip"))
+        first_run = {p.relative_to(out) for p in out.rglob("*.zip")}
         download_cohort(matched_csv=csv_path, output=out)
-        after = sorted(p.relative_to(out) for p in out.rglob("*.zip"))
+        after = {p.relative_to(out) for p in out.rglob("*.zip")}
 
-        # The first visit's paths are unchanged, so nothing was re-downloaded
-        # into a second folder.
-        assert first_run == after[: len(first_run)]
-        assert len(after) == 4
+        # Every path the verification run created still exists, so the second
+        # run continued it rather than filing the same visit again.
+        assert first_run <= after
+        assert len(first_run) == 2 and len(after) == 4
 
     def test_a_resumed_run_skips_what_is_already_there(self, tmp_path, stub_client):
         csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
