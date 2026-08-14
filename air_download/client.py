@@ -860,9 +860,11 @@ class AIRClient:
             series = keep_thinnest_axial(series, axial_patterns)
         if not series:
             logger.warning(
-                "No series found for %s. Check your search parameters.",
-                exam_output_fp.stem,
+                "No series found for one exam, so no archive was written. "
+                "Check your search parameters, or re-run with -v to see which."
             )
+            # Only at DEBUG: naming the exam means naming an accession number.
+            logger.debug("No series for accession %s.", exam_output_fp.stem)
             return
 
         # download/start may return non-2xx with a JSON body containing
@@ -908,7 +910,9 @@ class AIRClient:
                 total=total_size,
                 unit="B",
                 unit_scale=True,
-                desc=f"Downloading accession {exam_output_fp.stem}",
+                # Not the accession number: a progress bar is console output,
+                # and an accession number is an identifier.
+                desc="Downloading exam",
                 leave=False,
             ) as progress_bar,
         ):

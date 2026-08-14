@@ -180,3 +180,45 @@ class TestListSeries:
         assert kwargs["json"] is study
         # No download endpoint may be touched.
         assert len(calls) == 1
+
+
+class TestIdentifiersStayOffTheConsole:
+    """An accession number is an identifier, so it never reaches a log line."""
+
+    def test_the_no_series_warning_does_not_name_the_accession(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        client = TestListSeries._client(monkeypatch)
+        monkeypatch.setattr(client, "list_series", lambda study: [])
+
+        with caplog.at_level("WARNING"):
+            client._download_single_exam(
+                study={"accessionNumber": "SECRET-ACC"},
+                exam_index=0,
+                output=tmp_path / "SECRET-ACC.zip",
+                project=-1,
+                profile=-1,
+                series_inclusion=None,
+            )
+
+        assert "No series found" in caplog.text
+        assert "SECRET-ACC" not in caplog.text
+
+    def test_the_accession_is_still_available_at_debug(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        # Finding which exam missed is a real need; -v is where it belongs.
+        client = TestListSeries._client(monkeypatch)
+        monkeypatch.setattr(client, "list_series", lambda study: [])
+
+        with caplog.at_level("DEBUG"):
+            client._download_single_exam(
+                study={"accessionNumber": "SECRET-ACC"},
+                exam_index=0,
+                output=tmp_path / "SECRET-ACC.zip",
+                project=-1,
+                profile=-1,
+                series_inclusion=None,
+            )
+
+        assert "SECRET-ACC" in caplog.text
