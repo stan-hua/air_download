@@ -25,17 +25,28 @@ Nothing here reads an identifier. Output mirrors the pseudonymous cohort
 layout, so ``P0001/visit-01/ct/A0002.nii.gz`` sits where its archive did and
 joins back through the crosswalk exactly as before.
 
+The ultrasound half also de-identifies. Ultrasound burns patient details into
+the banner around the image, and ``BurnedInAnnotation`` (0028,0301) is optional
+and routinely absent, so it cannot be used to decide whether that happened.
+Cropping to ``SequenceOfUltrasoundRegions`` -- the scanner's own statement of
+which pixels are image -- removes it deterministically. That crop happens
+first, and the ``ultraml`` beamform crop only ever runs inside it.
+
 Examples
 --------
 Preview what would be written, touching nothing::
 
-    pixi run python -m air_download.us_ct.convert ct --input output-cohort/ \
-        --output_dir output-nifti/ --dry_run
+    pixi run convert ct --input output-cohort/ --output_dir output-arrays/ \
+        --dry_run
 
 Convert every CT in a cohort::
 
-    pixi run python -m air_download.us_ct.convert ct --input output-cohort/ \
-        --output_dir output-nifti/
+    pixi run convert ct --input output-cohort/ --output_dir output-arrays/
+
+Convert the ultrasound clips, keeping those of 20 frames or more::
+
+    pixi run convert us --input output-cohort/ --output_dir output-arrays/ \
+        --min_frames 20
 """
 
 # Standard libraries
@@ -49,17 +60,21 @@ from typing import Any
 import fire
 import nibabel as nib
 import numpy as np
+import zarr
 from pydicom import dcmread
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
+from ultraml.core.extract import EmptyMaskError, compute_ultrasound_video_mask
+from zarr.codecs import BloscCodec
 
 # Custom libraries
-from air_download.frames import _is_skippable
+from air_download.frames import DEFAULT_MIN_FRAMES, _is_skippable
 from air_download.utils import configure_logging
 
 logger = logging.getLogger(__name__)
 
 CT_SUFFIX = ".nii.gz"
+US_SUFFIX = ".zarr"
 
 # Slice positions are floats off a scanner, so "same" needs a tolerance.
 ORIENTATION_TOLERANCE = 1e-3
@@ -379,9 +394,302 @@ def ct(
     )
 
 
+def region_box(dataset: Any) -> tuple[int, int, int, int]:
+    """Return the scanner's own ultrasound region, as ``(x0, y0, x1, y1)``.
+
+    ``SequenceOfUltrasoundRegions`` (0018,6011) is where the scanner declares
+    which part of the frame is image rather than chrome. Cropping to it is the
+    de-identification step: ultrasound burns patient details into the banner
+    outside it, and ``BurnedInAnnotation`` (0028,0301) is optional and
+    routinely absent, so it cannot be used to decide whether that happened.
+
+    Parameters
+    ----------
+    dataset : pydicom.Dataset
+        A parsed ultrasound instance.
+
+    Returns
+    -------
+    tuple of int
+        The region's bounds within the frame.
+
+    Raises
+    ------
+    ConversionError
+        If the instance declares no region. Falling back to the whole frame
+        would write the banner, so this refuses instead.
+    """
+    regions = getattr(dataset, "SequenceOfUltrasoundRegions", None) or []
+    if not regions:
+        raise ConversionError(
+            "This instance declares no SequenceOfUltrasoundRegions, so the "
+            "image area cannot be identified and the banner -- which may "
+            "carry burned-in patient details -- cannot be cropped away."
+        )
+    region = regions[0]
+    return (
+        int(region.RegionLocationMinX0),
+        int(region.RegionLocationMinY0),
+        int(region.RegionLocationMaxX1),
+        int(region.RegionLocationMaxY1),
+    )
+
+
+def is_grayscale(frames: np.ndarray, tolerance: int = 20) -> bool:
+    """Report whether a colour clip is really grayscale in an RGB container.
+
+    B-mode ultrasound is grayscale but is often stored with three identical
+    channels, so collapsing costs nothing and saves two thirds of the space.
+    Colour Doppler is the exception and must keep its channels. The test
+    tolerates a little chroma noise, because the source is JPEG.
+
+    Parameters
+    ----------
+    frames : numpy.ndarray
+        Clip of shape ``(T, H, W, C)``.
+    tolerance : int, optional
+        Channel spread at or below which a pixel counts as gray.
+
+    Returns
+    -------
+    bool
+        True when the clip carries no meaningful colour.
+    """
+    if frames.ndim != 4 or frames.shape[-1] < 3:
+        return True
+    spread = frames.max(axis=-1).astype(np.int16) - frames.min(axis=-1)
+    return float((spread > tolerance).mean()) <= 0.001
+
+
+def tighten_to_beamform(frames: np.ndarray) -> tuple[np.ndarray, tuple | None]:
+    """Crop a clip to the moving beamform, or leave it as it is.
+
+    The region box is conservative -- it keeps depth markers and the ``cm``
+    label in the corner. ``ultraml`` finds the part that actually moves. This
+    runs *after* the region crop, never instead of it: the mask grows through
+    connected bright pixels, so on a full frame it could in principle reach
+    the banner, whereas after the crop there is no banner left to reach.
+
+    Parameters
+    ----------
+    frames : numpy.ndarray
+        Clip already cropped to its region box.
+
+    Returns
+    -------
+    tuple
+        The cropped clip, and the box used as ``(x0, y0, x1, y1)``, or None
+        when no beamform was found and the clip was left alone.
+    """
+    try:
+        _, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(frames)
+    except EmptyMaskError:
+        # Nothing moves. The region crop already made this safe, so keep the
+        # clip rather than discarding data.
+        return frames, None
+    return frames[:, y_min:y_max, x_min:x_max], (x_min, y_min, x_max, y_max)
+
+
+def convert_us_archive(
+    archive: Path,
+    destination: Path,
+    min_frames: int = DEFAULT_MIN_FRAMES,
+    tighten: bool = True,
+) -> int:
+    """Convert one ultrasound archive into a Zarr group, one array per clip.
+
+    Each clip becomes ``clip-<member_index>``, numbered by position in the
+    archive so it joins straight to the ``member_index`` column of
+    ``frames.csv``. Arrays are chunked one frame per chunk, so a loader reads
+    a single frame without touching the rest.
+
+    Parameters
+    ----------
+    archive : Path
+        A ``.zip`` holding one ultrasound exam.
+    destination : Path
+        Where to write the ``.zarr`` group.
+    min_frames : int, optional
+        Skip clips shorter than this. Stills and orphan fragments.
+    tighten : bool, optional
+        Crop to the moving beamform after the region crop.
+
+    Returns
+    -------
+    int
+        Number of clips written.
+    """
+    written = 0
+    group = None
+
+    with zipfile.ZipFile(archive) as zf:
+        for index, name in enumerate(zf.namelist()):
+            if _is_skippable(name):
+                continue
+            try:
+                ds = dcmread(io.BytesIO(zf.read(name)), force=False)
+            except (InvalidDicomError, AttributeError, ValueError, EOFError):
+                continue
+            if str(getattr(ds, "Modality", "")).upper() != "US":
+                continue
+            n_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
+            if n_frames < min_frames:
+                continue
+
+            frames = np.asarray(ds.pixel_array)
+            # A three-dimensional array is ambiguous -- (T, H, W) for a
+            # grayscale clip, (H, W, C) for a colour still -- so the frame
+            # count decides, never the shape.
+            if n_frames == 1:
+                frames = frames[None]
+
+            x0, y0, x1, y1 = region_box(ds)
+            frames = frames[:, y0:y1, x0:x1]
+
+            tight = None
+            if tighten:
+                frames, tight = tighten_to_beamform(frames)
+
+            gray = is_grayscale(frames)
+            if gray and frames.ndim == 4:
+                frames = frames[..., 0]
+
+            frames = np.ascontiguousarray(frames, dtype=np.uint8)
+            if group is None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                group = zarr.open_group(destination, mode="w")
+
+            array = group.create_array(
+                f"clip-{index:04d}",
+                shape=frames.shape,
+                dtype="uint8",
+                chunks=(1, *frames.shape[1:]),
+                compressors=BloscCodec(
+                    cname="zstd", clevel=5, shuffle="bitshuffle"
+                ),
+            )
+            array[:] = frames
+            array.attrs.update(
+                {
+                    "member_index": index,
+                    "n_frames": int(frames.shape[0]),
+                    "grayscale": bool(gray),
+                    "region_box": [x0, y0, x1, y1],
+                    "beamform_box": list(tight) if tight else None,
+                    "source_shape": [int(ds.Rows), int(ds.Columns)],
+                }
+            )
+            written += 1
+
+    if not written:
+        raise ConversionError(
+            f"No ultrasound clip of at least {min_frames} frames in this "
+            f"archive."
+        )
+    return written
+
+
+def us(
+    input: str | Path,
+    output_dir: str | Path,
+    min_frames: int = DEFAULT_MIN_FRAMES,
+    tighten: bool = True,
+    dry_run: bool = False,
+    verbose: bool = False,
+    quiet: bool = False,
+) -> None:
+    """Convert every ultrasound archive in a cohort into Zarr clips.
+
+    Three things happen to each clip, in this order. It is cropped to the
+    scanner's declared region, which removes the banner and is the step that
+    de-identifies the pixels. It is then tightened to the moving beamform,
+    which removes the depth markers the region box keeps. Finally it is
+    collapsed to one channel where the clip is grayscale in an RGB container,
+    which is lossless and saves two thirds of the space -- colour Doppler
+    keeps its channels.
+
+    Note the default ``min_frames`` is shared with ``air_frames`` and is
+    higher than the point where a cohort's frame distribution usually splits;
+    inspect the distribution first and pass the threshold you settled on.
+
+    Parameters
+    ----------
+    input : str or Path
+        Root of a downloaded cohort.
+    output_dir : str or Path
+        Root of the new tree. Must not be inside ``input``.
+    min_frames : int, optional
+        Skip clips shorter than this.
+    tighten : bool, optional
+        Crop to the moving beamform after the region crop.
+    dry_run : bool, optional
+        Report what would be written and write nothing.
+    verbose : bool, optional
+        Log at DEBUG.
+    quiet : bool, optional
+        Log at ERROR only.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``input`` does not exist.
+    ValueError
+        If ``output_dir`` sits inside ``input``, or ``min_frames`` is below 1.
+    """
+    configure_logging(verbose, quiet)
+    if min_frames < 1:
+        raise ValueError(f"min_frames must be at least 1, got {min_frames}.")
+    root = Path(input)
+    if not root.exists():
+        raise FileNotFoundError(f"{root} does not exist.")
+
+    destination = Path(output_dir)
+    if root.is_dir() and destination.resolve().is_relative_to(root.resolve()):
+        raise ValueError(
+            f"output_dir ({destination}) is inside input ({root}); write the "
+            f"converted tree somewhere else so the run cannot read its own "
+            f"output."
+        )
+
+    archives = sorted(root.rglob("us/*.zip")) if root.is_dir() else [root]
+    if not archives:
+        logger.warning("No ultrasound archives found under %s.", root)
+        return
+
+    clips = converted = failed = 0
+    for archive in tqdm(archives, desc="Converting US", disable=dry_run):
+        target = (destination / archive.relative_to(root)).with_suffix(US_SUFFIX)
+        if dry_run:
+            print(target)
+            continue
+        try:
+            clips += convert_us_archive(archive, target, min_frames, tighten)
+            converted += 1
+        except (ConversionError, zipfile.BadZipFile, OSError) as exc:
+            failed += 1
+            logger.error(
+                "One ultrasound archive could not be converted (%s); "
+                "continuing.",
+                exc.__class__.__name__,
+            )
+            # Only at DEBUG: the detail can name the archive.
+            logger.debug("Failure detail: %s", exc)
+
+    if dry_run:
+        logger.info("Dry run: %d archive(s) would be written.", len(archives))
+        return
+    logger.info(
+        "Wrote %d clip(s) from %d archive(s) to %s, %d archive(s) failed.",
+        clips,
+        converted,
+        destination,
+        failed,
+    )
+
+
 def cli() -> None:
     """CLI entry point."""
-    fire.Fire({"ct": ct})
+    fire.Fire({"ct": ct, "us": us})
 
 
 if __name__ == "__main__":

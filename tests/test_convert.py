@@ -11,7 +11,9 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+import zarr
 from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.sequence import Sequence
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 # Custom libraries
@@ -19,10 +21,14 @@ from air_download.us_ct.convert import (
     ConversionError,
     build_affine,
     convert_ct_archive,
+    convert_us_archive,
     ct,
+    is_grayscale,
     read_series,
+    region_box,
     slice_positions,
     to_hounsfield,
+    us,
 )
 
 SERIES_UID = generate_uid()
@@ -305,3 +311,256 @@ class TestCohortRun:
     def test_missing_input_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             ct(tmp_path / "nope", tmp_path / "nifti")
+
+
+# --------------------------------------------------------------------------
+# Ultrasound
+# --------------------------------------------------------------------------
+
+US_H, US_W = 120, 160
+US_BOX = (20, 10, 140, 110)          # x0, y0, x1, y1
+
+
+def make_us_clip(
+    path: Path,
+    n_frames: int = 30,
+    region=US_BOX,
+    colour: bool = False,
+    moving: bool = True,
+    banner: bool = True,
+) -> Path:
+    """Write a synthetic multi-frame ultrasound instance.
+
+    A bright drifting blob inside the region box, plus a static bright mark
+    outside it standing in for the burned-in patient banner.
+    """
+    frames = []
+    for t in range(n_frames):
+        frame = np.zeros((US_H, US_W), dtype=np.uint8)
+        offset = (t * 2) % 6 if moving else 0
+        value = 80 + (t * 15) % 150 if moving else 150
+        frame[40 + offset:90 + offset, 50:110] = value
+        if banner:
+            # Outside the region box: this must never survive.
+            frame[0:8, 0:60] = 255
+        frames.append(frame)
+    pixels = np.stack(frames)
+    if colour:
+        pixels = np.repeat(pixels[..., None], 3, axis=-1)
+        pixels[:, 45:55, 55:65, 0] = 250      # a patch of real colour
+
+    ds = Dataset()
+    ds.Modality = "US"
+    ds.SeriesInstanceUID = generate_uid()
+    ds.SOPInstanceUID = generate_uid()
+    ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.3.1"
+    ds.NumberOfFrames = n_frames
+    ds.Rows, ds.Columns = US_H, US_W
+    ds.SamplesPerPixel = 3 if colour else 1
+    ds.PhotometricInterpretation = "RGB" if colour else "MONOCHROME2"
+    if colour:
+        ds.PlanarConfiguration = 0
+    ds.BitsAllocated = ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.PixelData = pixels.tobytes()
+
+    if region is not None:
+        item = Dataset()
+        item.RegionLocationMinX0, item.RegionLocationMinY0 = region[0], region[1]
+        item.RegionLocationMaxX1, item.RegionLocationMaxY1 = region[2], region[3]
+        ds.SequenceOfUltrasoundRegions = Sequence([item])
+
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ds.save_as(path, enforce_file_format=True)
+    return path
+
+
+def make_us_archive(path: Path, clips: list[dict]) -> Path:
+    """Zip up one synthetic ultrasound exam, described one dict per clip."""
+    staging = path.parent / f"_staging_{path.stem}"
+    staging.mkdir(parents=True, exist_ok=True)
+    members = [
+        make_us_clip(staging / f"US{i:04d}.dcm", **spec)
+        for i, spec in enumerate(clips)
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        for member in members:
+            zf.write(member, arcname=member.name)
+    return path
+
+
+class TestRegionBox:
+    """The scanner's own statement of which pixels are image."""
+
+    def test_reads_the_declared_region(self, tmp_path):
+        path = make_us_clip(tmp_path / "us.dcm")
+        from pydicom import dcmread as read
+
+        assert region_box(read(path)) == US_BOX
+
+    def test_a_missing_region_refuses_rather_than_using_the_whole_frame(
+        self, tmp_path
+    ):
+        # Falling back to the full frame would write the banner.
+        path = make_us_clip(tmp_path / "us.dcm", region=None)
+        from pydicom import dcmread as read
+
+        with pytest.raises(ConversionError, match="no SequenceOfUltrasoundRegions"):
+            region_box(read(path))
+
+
+class TestGrayscaleDetection:
+    def test_three_identical_channels_are_grayscale(self):
+        frames = np.repeat(
+            np.full((4, 10, 10, 1), 120, np.uint8), 3, axis=-1
+        )
+        assert is_grayscale(frames)
+
+    def test_real_colour_is_kept(self):
+        frames = np.zeros((4, 10, 10, 3), np.uint8)
+        frames[..., 0] = 200
+        assert not is_grayscale(frames)
+
+    def test_a_little_jpeg_chroma_noise_still_counts_as_gray(self):
+        rng = np.random.default_rng(0)
+        frames = np.repeat(np.full((4, 40, 40, 1), 120, np.uint8), 3, axis=-1)
+        frames[..., 1] += rng.integers(0, 3, (4, 40, 40), dtype=np.uint8)
+        assert is_grayscale(frames)
+
+
+class TestUltrasoundConversion:
+    """Region crop, beamform crop, channel collapse, one array per clip."""
+
+    def test_the_banner_never_survives(self, tmp_path):
+        # The whole point. The banner sits at rows 0-8, the region starts at
+        # row 10, so nothing above it can reach the output.
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        group = zarr.open_group(tmp_path / "A0001.zarr", mode="r")
+        clip = group["clip-0000"][:]
+        assert clip.max() < 255
+        assert clip.shape[1] <= US_BOX[3] - US_BOX[1]
+        assert clip.shape[2] <= US_BOX[2] - US_BOX[0]
+
+    def test_a_clip_with_real_colour_keeps_its_channels(self, tmp_path):
+        # Colour Doppler flow is the signal; collapsing it destroys the study.
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"colour": True}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.attrs["grayscale"] is False
+        assert clip.ndim == 4 and clip.shape[-1] == 3
+
+    def test_a_truly_grayscale_clip_loses_its_channel_axis(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.ndim == 3
+        assert clip.attrs["grayscale"] is True
+
+    def test_short_clips_are_skipped(self, tmp_path):
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{"n_frames": 30}, {"n_frames": 3}]
+        )
+        written = convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        assert written == 1
+
+    def test_clip_names_carry_the_member_index(self, tmp_path):
+        # So the arrays join straight to frames.csv.
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{"n_frames": 3}, {"n_frames": 30}]
+        )
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        group = zarr.open_group(tmp_path / "A0001.zarr", mode="r")
+        assert list(group.array_keys()) == ["clip-0001"]
+        assert group["clip-0001"].attrs["member_index"] == 1
+
+    def test_frames_are_chunked_one_at_a_time(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.chunks[0] == 1
+
+    def test_frame_count_is_preserved(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"n_frames": 37}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.shape[0] == 37
+
+    def test_tightening_crops_further_than_the_region(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "loose.zarr", min_frames=20, tighten=False)
+        convert_us_archive(archive, tmp_path / "tight.zarr", min_frames=20, tighten=True)
+        loose = zarr.open_group(tmp_path / "loose.zarr", mode="r")["clip-0000"]
+        tight = zarr.open_group(tmp_path / "tight.zarr", mode="r")["clip-0000"]
+        assert tight.shape[1] <= loose.shape[1]
+        assert tight.shape[2] < loose.shape[2]
+        assert tight.attrs["beamform_box"] is not None
+
+    def test_a_frozen_clip_falls_back_to_the_region_crop(self, tmp_path):
+        # Nothing moves, so there is no beamform to find -- but the region
+        # crop already made it safe, so the clip is kept rather than dropped.
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"moving": False}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.attrs["beamform_box"] is None
+        assert clip.shape[1:] == (US_BOX[3] - US_BOX[1], US_BOX[2] - US_BOX[0])
+
+    def test_an_archive_with_no_long_clip_raises(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"n_frames": 2}])
+        with pytest.raises(ConversionError, match="No ultrasound clip"):
+            convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+
+
+class TestUltrasoundCohortRun:
+    def _cohort(self, tmp_path):
+        root = tmp_path / "cohort"
+        make_us_archive(root / "P0001" / "visit-01" / "us" / "A0001.zip", [{}])
+        return root
+
+    def test_output_mirrors_the_pseudonymous_layout(self, tmp_path):
+        root = self._cohort(tmp_path)
+        us(root, tmp_path / "arrays", min_frames=20)
+        assert (
+            tmp_path / "arrays" / "P0001" / "visit-01" / "us" / "A0001.zarr"
+        ).is_dir()
+
+    def test_the_ct_half_is_left_alone(self, tmp_path):
+        root = self._cohort(tmp_path)
+        stack(root / "P0001" / "visit-01" / "ct")
+        us(root, tmp_path / "arrays", min_frames=20)
+        assert not (tmp_path / "arrays" / "P0001" / "visit-01" / "ct").exists()
+
+    def test_dry_run_writes_nothing(self, tmp_path, capsys):
+        root = self._cohort(tmp_path)
+        us(root, tmp_path / "arrays", dry_run=True)
+        assert not (tmp_path / "arrays").exists()
+        assert "A0001.zarr" in capsys.readouterr().out
+
+    def test_refuses_to_write_inside_its_input(self, tmp_path):
+        root = self._cohort(tmp_path)
+        with pytest.raises(ValueError, match="is inside input"):
+            us(root, root / "arrays")
+
+    def test_one_bad_archive_does_not_stop_the_run(self, tmp_path, caplog):
+        root = self._cohort(tmp_path)
+        make_us_archive(root / "P0002" / "visit-01" / "us" / "A0003.zip", [{}])
+        bad = root / "P0003" / "visit-01" / "us"
+        bad.mkdir(parents=True)
+        (bad / "A0009.zip").write_bytes(b"not a zip")
+
+        with caplog.at_level("INFO"):
+            us(root, tmp_path / "arrays", min_frames=20)
+        assert "2 clip(s) from 2 archive(s)" in caplog.text
+        assert "1 archive(s) failed" in caplog.text
+
+    def test_a_zero_threshold_raises(self, tmp_path):
+        root = self._cohort(tmp_path)
+        with pytest.raises(ValueError, match="min_frames must be at least 1"):
+            us(root, tmp_path / "arrays", min_frames=0)
