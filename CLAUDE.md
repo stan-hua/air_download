@@ -136,6 +136,36 @@ Scope is deliberate: the plain `air_download` path (`build_exam_output_path`) st
 
 Several ultrasounds can precede one CT, so a CT accession can repeat across rows. `n_preceding_us` / `us_rank_before_ct` / `is_closest_us` make that explicit, and a run warns via `count_ambiguous_cts`. The count is taken over **all** of the patient's ultrasounds, not just the paired ones, so a CT stays flagged when a preceding ultrasound was paired elsewhere — it describes the clinical picture, not the pairing strategy. Rank is resolved by identity (`u is us`), not equality, because two ultrasounds can share a timestamp and compare equal as dicts.
 
+### Conversion to ML-loadable arrays (`us_ct/convert.py`)
+
+The two halves need opposite operations. A CT arrives as a few hundred
+single-frame objects that are one volume, so conversion *assembles*. An
+ultrasound arrives as cine clips of different views, so conversion *separates*.
+
+- **Slices are ordered by `ImagePositionPatient` projected onto the slice
+  normal, never by `InstanceNumber`.** Scanners assign instance numbers wrongly
+  often enough to produce a silently shuffled volume; a test pins this with a
+  series whose instance numbers contradict its positions.
+- **NIfTI, not Zarr, for CT** — not a performance judgement. The open CT organ
+  segmentors (TotalSegmentator and relatives) are nnU-Net models that read and
+  write NIfTI, so any other container means converting out and back.
+- **NIfTI, not a bare array** — `PixelSpacing` varies per patient while slice
+  thickness does not, so voxels are anisotropic *and* inconsistent across the
+  cohort. Resampling to a common spacing needs real millimetre geometry, and
+  only the affine carries it. `build_affine` converts DICOM LPS to NIfTI RAS by
+  flipping the first two world axes; `nib.aff2axcodes` on an axial series must
+  give `('L', 'P', 'S')`.
+- **int16 Hounsfield units.** HU are integers over roughly -1024 to 3071;
+  float32 would double every volume to store nothing.
+- A series whose slices disagree on size or orientation, or that holds two
+  slices at one position, **raises** rather than writing a volume that is
+  quietly wrong. Uneven spacing warns and proceeds on the median.
+- Real cohort data is `JPEG Lossless, Process 14`, which pydicom cannot decode
+  unaided — hence `pylibjpeg[libjpeg]`, added from PyPI because neither it nor
+  gdcm has a conda-forge build for this Python. A missing decoder raises out of
+  the run rather than marking every archive failed, since it is an environment
+  problem, not a data one.
+
 ### Configuration resolution
 
 URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Project and profile: `-pj`/`-pf` → `AIR_PROJECT`/`AIR_PROFILE` in credential file → same env vars → `-1`, both via the shared `_resolve_id`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.
