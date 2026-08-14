@@ -297,7 +297,7 @@ Note that `--search-only` **appends** to `accessions.csv` if one is already ther
 
 > **These CSVs contain PHI** — MRNs, accession numbers, and birthdates. `.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip` so they cannot be committed by accident. Keep search output out of the repository, and check `git status` before staging.
 
-> **MRNs and accession numbers are text, not numbers.** They are written and read as strings at every step here, so a leading zero survives — `00123456` stays `00123456` through the search CSV, the matched CSV, and the cohort folder names. **Anything else that opens these files can still destroy them.** `pandas.read_csv` infers `00123456` as the integer `123456`, and Excel does the same on open *and on save*, silently pointing you at a different patient. Read them as text:
+> **MRNs and accession numbers are text, not numbers.** They are written and read as strings at every step here, so a leading zero survives — `00123456` stays `00123456` through the search CSV, the matched CSV, and into the cohort crosswalk. **Anything else that opens these files can still destroy them.** That matters more than it looks: an MRN that lost its zero upstream is a *different* key, so it would be filed as a second patient with its own folder. A run warns when two MRNs in one cohort differ only by leading zeros. `pandas.read_csv` infers `00123456` as the integer `123456`, and Excel does the same on open *and on save*, silently pointing you at a different patient. Read them as text:
 >
 > ```python
 > # pandas: force the identifier columns to stay strings
@@ -463,15 +463,17 @@ pixi run download-cohort --matched_csv matched_us_ct.csv \
 
 ```
 output-cohort/
-└── <mrn>/
-    └── 03-02-21/            # the date of the FAST
-        ├── us/<us_accession>.zip
-        └── ct/<ct_accession>.zip
+└── P0001/                   # a patient
+    └── visit-01/            # their first FAST-CT pair
+        ├── us/A0001.zip
+        └── ct/A0002.zip
+
+output-cohort_crosswalk.csv  # the only way back to real identifiers
 ```
 
-The visit folder is named for the **ultrasound's** date, so a CT that crossed midnight still files under the FAST that preceded it. The ultrasound keeps every series; the CT is reduced to its thinnest axial series alone, exactly as `--thinnest-axial` does — that split is built in, so there is no per-modality flag to remember. A CT with no axial series yields no archive and is counted as failed, so check the log rather than assuming a silent success.
+**Nothing in that tree is an identifier.** Patients, exams, and visits are all numbered, so the paths are safe to paste into a ticket, a traceback, or a shared terminal. The visit folder counts *within* a patient in the order their ultrasounds happened — it orders a patient's FAST-CT pairs, which is all the old date-named folder was doing, without being a date. The ultrasound keeps every series; the CT is reduced to its thinnest axial series alone, exactly as `--thinnest-axial` does — that split is built in, so there is no per-modality flag to remember. A CT with no axial series yields no archive and is counted as failed, so check the log rather than assuming a silent success.
 
-Only `mrn`, `us_accession_number`, `us_date_time`, and `ct_accession_number` are read, so a CSV from an older `match` run works too. Rows missing any of the four are skipped and counted in a warning.
+Only `mrn`, `us_accession_number`, `us_date_time`, and `ct_accession_number` are read (plus `ct_date_time` when present), so a CSV from an older `match` run works too. Rows missing any of the four are skipped and counted in a warning.
 
 Verify before committing to a long download. `--dry_run` prints the paths and makes no network call; `--n` downloads just the first rows for real:
 
@@ -483,9 +485,40 @@ pixi run download-cohort --matched_csv matched_us_ct.csv --output output-cohort/
 
 An archive already on disk is skipped (`--skip_existing`, on by default), so the verification pair is not fetched twice when you then run the whole cohort, and an interrupted run resumes where it stopped. A failed exam is counted and the run continues rather than aborting; re-run to retry it. Only counts are logged — never an MRN or accession number.
 
-> The output tree is **named** with MRNs and accession numbers. `.gitignore` covers `*.zip` and `output*/`, so an output directory whose name starts with `output` is ignored whole. If you point `--output` somewhere else, add it to `.gitignore` — the archives are ignored by extension, but the PHI-named folders are not.
+##### The crosswalk
 
-To download only one side of the cohort instead, split out whichever accession column you want and use `--accessions-csv`:
+`<output>_crosswalk.csv` holds the mapping, one row per archive:
+
+```
+anon_mrn, anon_accession_number, visit_folder, exam_type, archive_path, mrn, accession_number, date_time
+```
+
+The first five columns carry no PHI, so `cut -d, -f1-5 output-cohort_crosswalk.csv` is a shareable description of the cohort's entire structure. The last three are the sensitive half.
+
+- **Guard it like the data it unlocks.** It is a more dangerous file than anything it replaced: MRNs, accession numbers, and real timestamps in one place. `.gitignore` covers `*crosswalk*.csv` explicitly.
+- **It must live outside the cohort directory.** A path inside `--output` is refused, because a `tar` or `rsync` of the tree would otherwise ship the key with the lock. Use `--crosswalk_csv ~/private/cohort_crosswalk.csv` to put it somewhere else entirely.
+- **Losing it orphans the cohort permanently.** There is no other route back.
+
+**Adding to a cohort later is safe.** Identifiers are assigned on first sight and reloaded from the crosswalk before anything new is handed out, so a second run over a longer matched CSV reuses every ID the first run assigned: existing patients keep their number, their archives are skipped rather than re-fetched, and only genuinely new patients, exams, and visits get new IDs. A visit added later appends as the patient's next ordinal — ordinals are never renumbered, since that would move folders already on disk. When a late addition turns out to predate a visit already numbered, the run says so; sort by the crosswalk's `date_time` when you need true order.
+
+To join a downstream CSV back to real patients — `frames.csv` reports `anon_mrn` and `anon_accession_number` for exactly this:
+
+```bash
+pixi run python -c "
+import csv
+key = {(r['anon_mrn'], r['anon_accession_number']): r
+       for r in csv.DictReader(open('output-cohort_crosswalk.csv'))}
+for r in csv.DictReader(open('frames.csv')):
+    real = key.get((r['anon_mrn'], r['anon_accession_number']))
+    ...
+"
+```
+
+One CT can be matched to two ultrasounds, in which case it is copied into both visits and the join is 1:many on `archive_path`.
+
+> **What this does and does not de-identify.** The tree and the derived CSVs are pseudonymous. The DICOM files inside are whatever your AIR anonymization profile left them as — `PatientID`, `AccessionNumber`, and `StudyDate` in the headers are untouched by this package. A pseudonymous tree is not a shareable dataset; check `pixi run list-profiles` for what is actually being applied to the pixels' metadata.
+
+To download only one side of the cohort instead, split out whichever accession column you want and use `--accessions-csv`. Note that this is the plain download path, which is **not** pseudonymized — it names each archive `<accession>.zip`, deliberately, since it is ad-hoc use where you supplied the accession yourself and there is no cohort for a crosswalk to belong to:
 
 ```bash
 pixi run python -c "
@@ -508,25 +541,29 @@ pixi run download --accessions-csv matched_ct_only.csv -o matched_ct_dicom/ --th
 pixi run frames inspect --input output-cohort/ --output frames.csv --min_frames 60
 ```
 
-`frames.csv`, one row per instance:
+`frames.csv`, one row per instance — columns `archive`, `member`, `anon_mrn`, `anon_accession_number`, `series_description`, `modality`, `n_frames`, `rows`, `columns`, `passes`:
 
 ```
-accession  member        series_desc  n_frames  passes
-US-A       IMG0000.dcm   RUQ               148  True
-US-A       IMG0001.dcm   LUQ               132  True
-US-A       IMG0004.dcm   (still)             1  False
-US-B       IMG0000.dcm   IVC                22  False
+anon_mrn  anon_accession_number  member       series_description  n_frames  passes
+P0001     A0001                  IMG0000.dcm  RUQ                      148  True
+P0001     A0001                  IMG0001.dcm  LUQ                      132  True
+P0001     A0001                  IMG0004.dcm  (still)                    1  False
+P0002     A0003                  IMG0000.dcm  IVC                       22  False
 ```
 
 `frames_exams.csv`, one row per archive, which is where you spot exams that would drop out of the cohort entirely:
 
 ```
-accession  n_instances  n_passing  max_frames  total_frames
-US-A                 7          4         148           450
-US-B                 2          0          22            23
+anon_mrn  anon_accession_number  n_instances  n_passing  max_frames  total_frames
+P0001     A0001                            7          4         148           450
+P0002     A0003                            2          0          22            23
 ```
 
-`--min_frames` only fills in `passes` and the summary counts — **every instance is reported either way**, so you can look at the distribution before committing to a threshold. A run warns when any archive has `n_passing = 0`, naming the count rather than the accession numbers; the CSV has the identifiers.
+**The identifiers come from the path, never the DICOM header.** `PatientID` and `AccessionNumber` in the header hold the *real* values whenever a download ran without an anonymization profile, so reading them would write real identifiers into a CSV; nothing here reads them. An archive outside the pseudonymous cohort layout leaves both columns empty rather than guessing — some sites issue real accession numbers that look exactly like a generated `A0001` — and a run reports how many archives that covers. Join back through the [crosswalk](#the-crosswalk).
+
+`series_uid` and `sop_instance_uid` are not written either. They name no patient, but they are direct keys back into the PACS. The cost is that series grouping is now by `series_description` and `modality`, which merges two genuinely different series that share a description.
+
+`--min_frames` only fills in `passes` and the summary counts — **every instance is reported either way**, so you can look at the distribution before committing to a threshold. A run warns when any archive has `n_passing = 0`, naming the count rather than the archives; the CSV has the rows.
 
 Once the cut-off looks right, prune into a **new** tree. The source archives are never modified:
 

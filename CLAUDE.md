@@ -32,9 +32,10 @@ Request flow for every operation is: `cli.py` parses args → constructs `AIRCli
 - **`filters.py`** — `apply_inclusion_filter` / `apply_exclusion_filter`. Both take a comma-separated pattern string and do case-insensitive substring matching with OR logic over one dict field. They are applied to *exams* (on `modality` / `description`) inside `search()`, and to *series* (on `description`) inside `_download_single_exam`. Inclusion runs before exclusion. Also holds the `--thinnest-axial` series selection (see below).
 - **`utils.py`** — `build_exam_output_path` (directory vs. `.zip` path disambiguation, index suffix to avoid overwriting) and `write_exams_csv` (appends to `<output>/accessions.csv`, header written only when the file is new).
 - **`cli.py`** — arg parsing, logging setup, table printing. `_configure_logging` deliberately only touches the `air_download` logger so `urllib3`/`requests` stay quiet.
-- **`us_ct/`** — the subpackage holding everything that assumes an ultrasound→CT pairing specifically. The boundary is the point: a module belongs here if it names `us`/`ct` in its flags, columns, or output layout, and outside it if it generalises. `frames.py` is deliberately outside, since frame counting applies to any downloaded DICOM. Don't add general-purpose code here, and don't teach these two modules a third modality — a general matcher would be a new module, not a widening of these.
+- **`crosswalk.py`** — the mapping from real MRNs and accession numbers to the pseudonyms every output path uses. Top level, not under `us_ct/`, because it names neither modality and because `frames.py` imports it — putting it in the subpackage would invert the dependency direction. A library module with no CLI, so no `fire.Fire()`.
+- **`us_ct/`** — the subpackage holding everything that assumes an ultrasound→CT pairing specifically. The boundary is the point: a module belongs here if it names `us`/`ct` in its flags, columns, or output layout, and outside it if it generalises. `frames.py` and `crosswalk.py` are deliberately outside, since frame counting and pseudonymisation apply to any downloaded DICOM. Don't add general-purpose code here, and don't teach these two modules a third modality — a general matcher would be a new module, not a widening of these.
   - **`us_ct/match.py`** — cohort building, not API access: pairs two search-result CSVs into ultrasound→CT matches. Its own `air_match` entry point, and the first module written to the **Conventions** below (`fire.Fire()`, NumPy docstrings, grouped imports), since it was added after they were set. New modules should follow it rather than the older files.
-  - **`us_ct/cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/<mrn>/<MM-DD-YY>/{us,ct}/`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions**, like `match.py`.
+  - **`us_ct/cohort.py`** — downloads the paired CSV `match.py` writes, into `<output>/P0001/visit-01/{us,ct}/A0001.zip`. Own `air_cohort` entry point. Pure orchestration over `AIRClient.download()`: it passes an explicit `.zip` path per exam, which works only because `build_exam_output_path` returns a non-existent `.zip` path verbatim — and only that function's *directory* branch calls `mkdir`, so `cohort.py` creates the parents itself. Follows the **Conventions**, like `match.py`.
 - **`frames.py`** — counts frames in downloaded DICOM files and prunes by them. Own `air_frames` entry point. The only module that reads local files rather than the API.
 - **`air_download/air_download.py`** — backward-compat shim re-exporting the public names. Add new code to the focused modules, not here.
 
@@ -100,13 +101,32 @@ The one module that reads local DICOM files rather than the web API — a delibe
 
 `dcmread(..., stop_before_pixels=True)` is what makes inspecting cheap — never drop it. Members are read whole into `BytesIO` because a header tag can sit anywhere before the pixel data; don't "optimise" this into a fixed-size prefix read.
 
-`inspect` never filters: `min_frames` only fills the `passes` column and the summary, since the point is to see the distribution before choosing a cut-off. `prune` writes a **new** tree and refuses an `output_dir` inside its input; keep it non-destructive. Both log counts only — the archives with `n_passing = 0` are named in the CSV, never in a log line, because an accession number is an identifier.
+`inspect` never filters: `min_frames` only fills the `passes` column and the summary, since the point is to see the distribution before choosing a cut-off. `prune` writes a **new** tree and refuses an `output_dir` inside its input; keep it non-destructive. Both log counts only — the archives with `n_passing = 0` are named in the CSV, never in a log line.
 
-Accession falls back to the archive stem when the header lacks it, since an anonymization profile may have stripped it.
+**Identifiers come from the path, never the DICOM header.** `_instance_row` used to read `PatientID` and `AccessionNumber`; those hold the *real* values whenever a download ran with no anonymization profile, so the CSV was being written with real MRNs. Both reads were deleted rather than guarded — don't reintroduce either, or a header fallback for them. `anon_mrn` / `anon_accession_number` come from `parse_anon_ids`, which lives in `crosswalk.py` beside the code that writes those paths so the two cannot drift. It requires a `P<digits>` component before filling *either* column: some sites issue real accession numbers shaped like `A0001`, and without that guard a flat tree would put a real one into a column named `anon_accession_number`. `summarise_by_exam` re-derives from the path rather than carrying a value up from the instance rows, so there is one rule, not two.
+
+`series_uid` and `sop_instance_uid` were dropped too — no patient information, but direct keys back into the PACS. The cost is real and documented: series grouping is now `series_description` + `modality`, which merges two series sharing a description.
+
+### Pseudonymisation (`crosswalk.py`)
+
+Three assign-on-first-seen maps, all persisted: `mrn` → `P0001`, `(mrn, accession)` → `A0001`, `(mrn, us_accession, ct_accession)` → `visit-01`. Reloading before assigning anything is what makes a resumed or extended run reuse identifiers instead of filing a patient twice, so **the crosswalk is part of the dataset, not a log**.
+
+- Exams key on the **pair**, never the accession alone (an accession number repeats across patients). The counter is global, so an `A` id belongs to exactly one patient.
+- Counters resume from `max(numeric suffix) + 1`, never from a row count. A truncated or hand-edited file would otherwise reissue an id a folder on disk already uses, silently merging two patients.
+- Rows are appended **immediately** and `record()` is called **before** the download. A row for an exam that then failed costs nothing; an archive with no way back cannot be repaired.
+- One row per `archive_path`, not per `(mrn, accession)`: a CT matched to two ultrasounds is copied into both visits, so joins on the anon pair are 1:many by design.
+- The first five columns carry no PHI and the last three do. That ordering is load-bearing — `cut -d, -f1-5` is the shareable projection.
+- An MRN differing from a known one only by leading zeros is filed as a separate patient (it legally is one) but **warns**, because far more often it is a zero lost to Excel upstream. `int()` appears only on the digits of generated ids, which are counters this module minted, never identifiers.
 
 ### Cohort download layout (`us_ct/cohort.py`)
 
-The visit folder is the **ultrasound's** date (`MM-DD-YY`), not the CT's, so a CT that crossed midnight still files under the FAST it followed. That assumes one FAST-CT visit per patient per day; a second pair claiming the same folder gets an index suffix and a warning rather than merging two visits into one.
+Nothing in an output path is an identifier: `<output>/P0001/visit-01/{us,ct}/A0001.zip`. The visit folder is an **ordinal within the patient**, not a date — it exists to order a patient's FAST-CT pairs, which was the date's only job. Rows are sorted by `us_date_time` per patient before numbering, and sorted **before** `--n` slices them, so a verification run and the full run assign identical ids. Ordinals are never renumbered (that would move folders already on disk); a late addition that predates a numbered visit appends and warns. Because each pair gets its own ordinal, two pairs on one day cannot collide — the old `claimed` index-suffixing is gone and should not come back.
+
+The crosswalk defaults to `<output>_crosswalk.csv` beside the cohort and a path **inside** `output` is refused, mirroring `prune`'s check: a copy of the tree would otherwise carry the key with the lock. `--dry_run` builds it `read_only=True`, so a preview over a started cohort is exact and writes nothing.
+
+`ct_date_time` is read via `.get(..., "")` and deliberately **not** in `REQUIRED_COLUMNS`, following the `us_image_count` precedent, so an older matched CSV still works. The in-memory dedupe cache for a repeated CT keys on the anon pair, so nothing outliving a single call holds a real identifier. `_safe_component` now only ever sees generated components; it stays as defence in depth, and its tests with it.
+
+Scope is deliberate: the plain `air_download` path (`build_exam_output_path`) still names files `<accession>.zip`. It is ad-hoc use where the caller supplied the accession, it has no cohort identity for a crosswalk to attach to, and it is on the path of *every* download including this one. Don't "finish the job" by pseudonymising it.
 
 `--thinnest-axial` is not a flag here — CT always gets the thinnest axial series alone, US always gets every series. `--skip_existing` (default on) is what makes `--n 1` → inspect → full run cheap, and it is also the resume path; `_download_single_exam` opens with `"wb"`, so without it a re-run re-fetches everything. A failed exam is counted and the loop continues. Exception detail is logged at DEBUG only, since it can carry an identifier.
 
@@ -128,17 +148,18 @@ The loop returns or raises on its final pass, which keeps two existing behaviors
 
 **Never read the contents of any file that may contain PHI.** This is a hard rule, not a default to weigh against convenience.
 
-- **Never** `Read`, `cat`, `head`, `tail`, `grep`, or otherwise open `accessions.csv`, any `*.csv` of search results, downloaded `*.zip`/DICOM, or the credential file. Not to check a format, not to debug a parser, not "just the first line", not even when asked to.
+- **Never** `Read`, `cat`, `head`, `tail`, `grep`, or otherwise open `accessions.csv`, any `*.csv` of search results, any `*crosswalk*.csv`, downloaded `*.zip`/DICOM, or the credential file. Not to check a format, not to debug a parser, not "just the first line", not even when asked to.
+- The **crosswalk is the most sensitive file this package writes** — MRNs, accession numbers, and real timestamps in one place, and the only thing that can re-identify a cohort. Treat it as strictly more dangerous than anything it replaced. A cohort *tree* is now safe to name in a log or a ticket; its crosswalk never is.
 - Metadata only, when you genuinely need it: `wc -l`, `ls -l`, `test -f`, and column *names* via a header-only check you have written yourself. Never row values.
 - To exercise CSV-reading code, **generate synthetic data** in the scratchpad (`A1,111,...`) and read that. Never a real file from the working tree.
 - `git add -A` has already swept a 25k-row `accessions.csv` into a commit once. Stage explicit paths, or check `git status` before staging, and never assume the ignore rules cover a new output directory.
 - If PHI does reach git: check `origin/main` before anything else, remove from history, then `git reflog expire --expire=now --all && git gc --prune=now` to drop the blob. Report exactly what was and was not pushed.
 
-`.gitignore` covers `accessions.csv`, `*.csv`, `output*/`, and `*.zip`. Keep it that way.
+`.gitignore` covers `accessions.csv`, `*.csv`, `*crosswalk*.csv`, `output*/`, and `*.zip`. Keep it that way — the crosswalk line is redundant with `*.csv` on purpose, so relaxing that rule cannot quietly expose it.
 
 ## Identifiers are text, never numbers
 
-MRNs and accession numbers look numeric but are not: a leading zero is part of the identifier, and dropping it names a **different patient**. Everything here reads and writes them as strings — `csv` does that by default, and `as_identifier` (in `utils.py`) coerces anything the API might return typed as a number. Tests in `test_utils.py`, `test_match.py`, and `test_cohort.py` pin `00123456` end to end; keep them.
+MRNs and accession numbers look numeric but are not: a leading zero is part of the identifier, and dropping it names a **different patient**. Everything here reads and writes them as strings — `csv` does that by default, and `as_identifier` (in `utils.py`) coerces anything the API might return typed as a number. Tests in `test_utils.py`, `test_match.py`, `test_cohort.py`, and `test_crosswalk.py` pin `00123456` end to end; keep them. It no longer reaches a folder name — nothing real does — so what those tests now pin is that it arrives intact in the crosswalk, which is the one file that still holds it.
 
 Never introduce `int()`, `pandas.read_csv` without `dtype=str`, or an argparse `type=int` on any identifier path. When a user reports lost leading zeros, check outside this package first — `pandas.read_csv` and Excel both coerce on read, and Excel also on save — but verify rather than assume, since the failure silently selects the wrong patient.
 

@@ -12,9 +12,14 @@ accessions.csv
 output*/
 *.zip
 
-# Patient spreadsheets, and cohort downloads whose folder names are
-# themselves MRNs. The archives inside are covered by *.zip, the folders
-# are not.
+# The crosswalk maps every pseudonym in a cohort back to a real patient,
+# which makes it the most sensitive file this package writes. Covered by
+# *.csv above; named again here so relaxing that rule cannot expose it.
+*crosswalk*.csv
+
+# Patient spreadsheets, and bulk cohort downloads. A cohort tree's folder
+# names are pseudonyms now, so the names themselves are safe -- it stays
+# ignored because it is gigabytes of DICOM, not because it is PHI.
 *.xlsx
 *.xls
 cohort/
