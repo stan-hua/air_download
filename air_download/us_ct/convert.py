@@ -473,13 +473,22 @@ def is_grayscale(frames: np.ndarray, tolerance: int = 20) -> bool:
 
 
 def tighten_to_beamform(frames: np.ndarray) -> tuple[np.ndarray, tuple | None]:
-    """Crop a clip to the moving beamform, or leave it as it is.
+    """Mask a clip down to the moving beamform and crop to it.
 
-    The region box is conservative -- it keeps depth markers and the ``cm``
-    label in the corner. ``ultraml`` finds the part that actually moves. This
-    runs *after* the region crop, never instead of it: the mask grows through
-    connected bright pixels, so on a full frame it could in principle reach
-    the banner, whereas after the crop there is no banner left to reach.
+    The region box is conservative -- it keeps depth markers, the ``cm``
+    label, and a small coloured vendor mark. ``ultraml`` finds the part that
+    actually moves. This runs *after* the region crop, never instead of it:
+    the mask grows through connected bright pixels, so on a full frame it
+    could in principle reach the banner, whereas after the crop there is no
+    banner left to reach.
+
+    The mask is applied, not just its bounding box. Zeroing everything
+    outside it removes the static chrome that sits within the box, halves the
+    stored size, and is what makes a clip register as grayscale -- a 24x26
+    coloured vendor mark is otherwise enough to force three channels on an
+    entirely gray study. The dark pixels this discards are the background
+    around the sector, not anechoic fluid inside it: filling the mask's
+    interior holes first recovers almost none of them.
 
     Parameters
     ----------
@@ -489,15 +498,17 @@ def tighten_to_beamform(frames: np.ndarray) -> tuple[np.ndarray, tuple | None]:
     Returns
     -------
     tuple
-        The cropped clip, and the box used as ``(x0, y0, x1, y1)``, or None
-        when no beamform was found and the clip was left alone.
+        The masked and cropped clip, and the box used as ``(x0, y0, x1, y1)``,
+        or None when no beamform was found and the clip was left alone.
     """
     try:
-        _, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(frames)
+        mask, (y_min, y_max, x_min, x_max) = compute_ultrasound_video_mask(frames)
     except EmptyMaskError:
         # Nothing moves. The region crop already made this safe, so keep the
         # clip rather than discarding data.
         return frames, None
+    frames = frames.copy()
+    frames[:, ~mask] = 0
     return frames[:, y_min:y_max, x_min:x_max], (x_min, y_min, x_max, y_max)
 
 

@@ -326,6 +326,7 @@ def make_us_clip(
     n_frames: int = 30,
     region=US_BOX,
     colour: bool = False,
+    colour_mark: bool = False,
     moving: bool = True,
     banner: bool = True,
 ) -> Path:
@@ -345,9 +346,15 @@ def make_us_clip(
             frame[0:8, 0:60] = 255
         frames.append(frame)
     pixels = np.stack(frames)
-    if colour:
+    if colour or colour_mark:
         pixels = np.repeat(pixels[..., None], 3, axis=-1)
-        pixels[:, 45:55, 55:65, 0] = 250      # a patch of real colour
+    if colour:
+        # Inside the moving blob: real flow, and it must survive.
+        pixels[:, 45:55, 55:65, 0] = 250
+    if colour_mark:
+        # Inside the region box but outside the beamform, and static: a
+        # vendor mark. It must not force three channels on a gray study.
+        pixels[:, 12:20, 25:40, 0] = 250
 
     ds = Dataset()
     ds.Modality = "US"
@@ -356,9 +363,10 @@ def make_us_clip(
     ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.3.1"
     ds.NumberOfFrames = n_frames
     ds.Rows, ds.Columns = US_H, US_W
-    ds.SamplesPerPixel = 3 if colour else 1
-    ds.PhotometricInterpretation = "RGB" if colour else "MONOCHROME2"
-    if colour:
+    rgb = colour or colour_mark
+    ds.SamplesPerPixel = 3 if rgb else 1
+    ds.PhotometricInterpretation = "RGB" if rgb else "MONOCHROME2"
+    if rgb:
         ds.PlanarConfiguration = 0
     ds.BitsAllocated = ds.BitsStored = 8
     ds.HighBit = 7
@@ -513,6 +521,24 @@ class TestUltrasoundConversion:
         assert tight.shape[1] <= loose.shape[1]
         assert tight.shape[2] < loose.shape[2]
         assert tight.attrs["beamform_box"] is not None
+
+    def test_static_chrome_inside_the_region_is_masked_away(self, tmp_path):
+        # A vendor mark inside the region box does not move, so the beamform
+        # mask excludes it. Left in, it forces three channels on a gray study.
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{"colour_mark": True}]
+        )
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.attrs["grayscale"] is True
+        assert clip.ndim == 3
+
+    def test_pixels_outside_the_beamform_are_zeroed(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"][:]
+        # The corners of the crop sit outside the moving blob.
+        assert clip[:, 0, 0].max() == 0
 
     def test_a_frozen_clip_falls_back_to_the_region_crop(self, tmp_path):
         # Nothing moves, so there is no beamform to find -- but the region
