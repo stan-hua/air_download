@@ -166,6 +166,14 @@ ultrasound arrives as cine clips of different views, so conversion *separates*.
   the run rather than marking every archive failed, since it is an environment
   problem, not a data one.
 
+The ultrasound half of `convert.py` is where de-identification actually happens, and the ordering is load-bearing:
+
+- **Crop to `SequenceOfUltrasoundRegions` first, always.** Ultrasound burns patient details into the banner; `BurnedInAnnotation` is optional and was absent on all 203 instances of the test cohort, so it proves nothing. An instance declaring no region is **refused**, never cropped to the full frame.
+- **The `ultraml` beamform crop only runs inside that box.** Mask growing follows connected bright pixels, so on a full frame it could reach the banner. After the region crop there is no banner to reach. Don't reorder these.
+- **Apply the mask, not just its bounding box.** A ~24x26 static coloured vendor mark sits inside the region box on every frame, and it was enough to push 190 of 197 grayscale clips into three-channel storage. Masking removes it, halves the size, and makes the grayscale test clean. The dark pixels this discards are background outside the sector, not anechoic fluid inside it — filling the mask's interior holes first recovers almost none of them (measured: 25.2% of faint pixels excluded against 22.9%), which matters because free fluid is exactly what a FAST looks for.
+- **Chunk eight frames, zstd level 9, no shuffle.** Measured: one frame per chunk stores 38% of raw, eight frames at clevel 9 stores 22%, and the gain needs both — clevel 9 alone at one frame reaches only 35%. Bitshuffle was measured and dropped as slightly larger and slower on 8-bit speckle.
+- `pixel_array` is three-dimensional for **both** a grayscale multi-frame clip and a colour still, so the **frame count** decides whether there is a time axis, never `ndim`. Getting this wrong gave every clip a bogus leading axis.
+
 ### Configuration resolution
 
 URL: `--url` flag → `AIR_URL` in credential file → `AIR_URL` env var. Credentials: credential file → env vars. Project and profile: `-pj`/`-pf` → `AIR_PROJECT`/`AIR_PROFILE` in credential file → same env vars → `-1`, both via the shared `_resolve_id`. The credential file is dotenv-format, read via `dotenv_values`. `_resolve_url` appends a trailing slash because every endpoint is joined with `urljoin`, which drops the last path segment without one.

@@ -577,6 +577,43 @@ pixi run frames prune --input output-cohort/ --output_dir output-60frames/ --min
 
 Each archive is rewritten at the same relative path holding only the qualifying instances; one left with nothing is not written at all and is counted in a warning. Writing inside `--input` is refused, so a run cannot read its own output.
 
+**`--min_frames` applies to ultrasound only** (`--min_frames_modalities`, default `US`). One CT object is one slice, so judging a CT on frame count marks every slice as failing and `prune` would delete the whole series.
+
+### Converting to arrays a model can load
+
+`pixi run convert` turns a downloaded cohort into per-exam files for PyTorch. The two halves need opposite operations, so they are separate commands.
+
+```bash
+pixi run convert ct --input output-cohort/ --output_dir output-arrays/
+pixi run convert us --input output-cohort/ --output_dir output-arrays/ --min_frames 20 --grayscale True
+```
+
+Output mirrors the pseudonymous layout, so `P0001/visit-01/ct/A0002.zip` becomes `P0001/visit-01/ct/A0002.nii.gz` and still joins through the [crosswalk](#the-crosswalk).
+
+**CT → one NIfTI per exam.** A CT arrives as a few hundred single-frame objects that are slices of one volume, so conversion *assembles*. Slices are ordered by `ImagePositionPatient` projected onto the slice normal — never by `InstanceNumber`, which scanners assign wrongly often enough to produce a silently shuffled volume. Pixels are rescaled to Hounsfield units and stored as int16, since HU are integers and float32 would double every volume to hold nothing.
+
+NIfTI rather than Zarr is not a performance judgement: the open CT organ segmentors ([TotalSegmentator](https://pubs.rsna.org/doi/full/10.1148/ryai.230024) and relatives) are nnU-Net models that read and write NIfTI, so any other container means converting out and back. NIfTI rather than a bare `.npy` because `PixelSpacing` varies per patient while slice thickness does not — resampling to a common spacing needs the real millimetre geometry, and only the affine carries it.
+
+A series whose slices disagree on size or orientation, or that holds two slices at one position, is refused rather than written as a volume that is quietly wrong.
+
+**US → one Zarr array per clip.** An ultrasound arrives as cine clips of different views, so conversion *separates*. Each clip becomes `clip-<member_index>` in a Zarr group per exam, named to join straight to the `member_index` column of `frames.csv`. Three things happen per clip, in this order:
+
+1. **Crop to `SequenceOfUltrasoundRegions`.** This is the de-identification step — see below.
+2. **Mask and crop to the moving beamform**, via [ultraml](https://github.com/stan-hua/ultraml). The region box is conservative: it keeps depth markers, the `cm` label, and a small coloured vendor mark. The beamform mask is what removes them.
+3. **Collapse to one channel.** `--grayscale True` forces it for a B-mode-only cohort; the default decides per clip so colour Doppler keeps its channels.
+
+> **Ultrasound burns patient details into the banner around the image.** `BurnedInAnnotation` (0028,0301) is optional and routinely absent, so it cannot be used to decide whether that happened — assume it did. Cropping to `SequenceOfUltrasoundRegions`, the scanner's own statement of which pixels are image, removes it deterministically. That crop always runs **first**, and the beamform crop only ever runs inside it: mask growing follows connected bright pixels, so on a full frame it could in principle reach the banner, whereas after the crop there is no banner left to reach. An instance that declares no region is refused rather than falling back to the whole frame.
+
+Arrays are chunked eight frames at a time, zstd level 9. That is measured, not guessed: one frame per chunk stores 38% of raw against 22% for eight, because a single frame is too small a window for zstd to find the redundancy consecutive cine frames obviously have. Reading one random frame costs about 3 ms, and a model fed a window of consecutive frames reads a whole chunk anyway.
+
+```python
+import zarr
+group = zarr.open_group("output-arrays/P0001/visit-01/us/A0001.zarr", mode="r")
+clip = group["clip-0004"]          # (frames, height, width), uint8
+frame = clip[7]                    # one frame, without touching the rest
+clip.attrs["region_box"]           # what was cropped away, and why
+```
+
 ### Retries
 
 Requests that fail transiently — connection errors, timeouts, rate limiting (`429`), and server errors (`5xx`) — are retried automatically with exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 60s. If the server sends a numeric `Retry-After` header, that wins over the computed delay. Ordinary client errors such as `401` or `404` fail immediately, since retrying cannot help.
