@@ -481,11 +481,22 @@ class TestUltrasoundConversion:
         assert list(group.array_keys()) == ["clip-0001"]
         assert group["clip-0001"].attrs["member_index"] == 1
 
-    def test_frames_are_chunked_one_at_a_time(self, tmp_path):
+    def test_frames_are_chunked_for_compression(self, tmp_path):
+        # Several frames per chunk is what lets zstd find the redundancy
+        # between them; one frame per chunk measured 38% of raw against 22%.
         archive = make_us_archive(tmp_path / "A0001.zip", [{}])
         convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
         clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
-        assert clip.chunks[0] == 1
+        assert clip.chunks[0] == 8
+        assert clip.chunks[1:] == clip.shape[1:]
+
+    def test_a_clip_shorter_than_the_chunk_is_not_padded(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"n_frames": 5}])
+        convert_us_archive(
+            archive, tmp_path / "A0001.zarr", min_frames=2, chunk_frames=8
+        )
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.chunks[0] == 5
 
     def test_frame_count_is_preserved(self, tmp_path):
         archive = make_us_archive(tmp_path / "A0001.zip", [{"n_frames": 37}])

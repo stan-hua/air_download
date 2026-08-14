@@ -76,6 +76,17 @@ logger = logging.getLogger(__name__)
 CT_SUFFIX = ".nii.gz"
 US_SUFFIX = ".zarr"
 
+# Measured on real FAST clips. Chunking several frames together is what lets
+# zstd find the redundancy *between* frames, which a one-frame chunk cannot:
+# one frame per chunk holds 38% of raw, eight frames at clevel 9 holds 22%.
+# The gain needs both -- clevel 9 alone, at one frame per chunk, only reaches
+# 35%, because there is too little in a chunk to find. Eight frames still
+# reads a single frame in ~3 ms, and a model fed a window of consecutive
+# frames reads a whole chunk anyway. Bitshuffle was measured and dropped: on
+# 8-bit speckle it is very slightly larger and slower to read.
+DEFAULT_CHUNK_FRAMES = 8
+US_COMPRESSOR = BloscCodec(cname="zstd", clevel=9, shuffle="noshuffle")
+
 # Slice positions are floats off a scanner, so "same" needs a tolerance.
 ORIENTATION_TOLERANCE = 1e-3
 # A spacing that varies by more than this between slices is a gap, not noise.
@@ -495,13 +506,15 @@ def convert_us_archive(
     destination: Path,
     min_frames: int = DEFAULT_MIN_FRAMES,
     tighten: bool = True,
+    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
 ) -> int:
     """Convert one ultrasound archive into a Zarr group, one array per clip.
 
     Each clip becomes ``clip-<member_index>``, numbered by position in the
     archive so it joins straight to the ``member_index`` column of
-    ``frames.csv``. Arrays are chunked one frame per chunk, so a loader reads
-    a single frame without touching the rest.
+    ``frames.csv``. Arrays are chunked a few frames at a time, which compresses
+    far better than one frame per chunk while still reading a single frame in
+    milliseconds.
 
     Parameters
     ----------
@@ -513,6 +526,9 @@ def convert_us_archive(
         Skip clips shorter than this. Stills and orphan fragments.
     tighten : bool, optional
         Crop to the moving beamform after the region crop.
+    chunk_frames : int, optional
+        Frames per chunk. Larger chunks compress better and read a window of
+        consecutive frames faster; smaller chunks read one random frame faster.
 
     Returns
     -------
@@ -563,10 +579,8 @@ def convert_us_archive(
                 f"clip-{index:04d}",
                 shape=frames.shape,
                 dtype="uint8",
-                chunks=(1, *frames.shape[1:]),
-                compressors=BloscCodec(
-                    cname="zstd", clevel=5, shuffle="bitshuffle"
-                ),
+                chunks=(min(chunk_frames, frames.shape[0]), *frames.shape[1:]),
+                compressors=US_COMPRESSOR,
             )
             array[:] = frames
             array.attrs.update(
@@ -594,6 +608,7 @@ def us(
     output_dir: str | Path,
     min_frames: int = DEFAULT_MIN_FRAMES,
     tighten: bool = True,
+    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
     dry_run: bool = False,
     verbose: bool = False,
     quiet: bool = False,
@@ -622,6 +637,8 @@ def us(
         Skip clips shorter than this.
     tighten : bool, optional
         Crop to the moving beamform after the region crop.
+    chunk_frames : int, optional
+        Frames per chunk in the written arrays.
     dry_run : bool, optional
         Report what would be written and write nothing.
     verbose : bool, optional
@@ -663,7 +680,9 @@ def us(
             print(target)
             continue
         try:
-            clips += convert_us_archive(archive, target, min_frames, tighten)
+            clips += convert_us_archive(
+                archive, target, min_frames, tighten, chunk_frames
+            )
             converted += 1
         except (ConversionError, zipfile.BadZipFile, OSError) as exc:
             failed += 1
