@@ -518,6 +518,7 @@ def convert_us_archive(
     min_frames: int = DEFAULT_MIN_FRAMES,
     tighten: bool = True,
     chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+    grayscale: bool | None = None,
 ) -> int:
     """Convert one ultrasound archive into a Zarr group, one array per clip.
 
@@ -540,6 +541,11 @@ def convert_us_archive(
     chunk_frames : int, optional
         Frames per chunk. Larger chunks compress better and read a window of
         consecutive frames faster; smaller chunks read one random frame faster.
+    grayscale : bool, optional
+        None decides per clip by looking for colour. True collapses every
+        clip to one channel, which is what a B-mode-only cohort wants: it is
+        a third of the size, and it cannot be defeated by a stray coloured
+        pixel the mask happened to keep. False keeps every channel.
 
     Returns
     -------
@@ -577,8 +583,9 @@ def convert_us_archive(
             if tighten:
                 frames, tight = tighten_to_beamform(frames)
 
-            gray = is_grayscale(frames)
+            gray = is_grayscale(frames) if grayscale is None else grayscale
             if gray and frames.ndim == 4:
+                # Channels are identical, so any one of them is the picture.
                 frames = frames[..., 0]
 
             frames = np.ascontiguousarray(frames, dtype=np.uint8)
@@ -599,6 +606,7 @@ def convert_us_archive(
                     "member_index": index,
                     "n_frames": int(frames.shape[0]),
                     "grayscale": bool(gray),
+                    "grayscale_forced": grayscale is not None,
                     "region_box": [x0, y0, x1, y1],
                     "beamform_box": list(tight) if tight else None,
                     "source_shape": [int(ds.Rows), int(ds.Columns)],
@@ -620,6 +628,7 @@ def us(
     min_frames: int = DEFAULT_MIN_FRAMES,
     tighten: bool = True,
     chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+    grayscale: bool | None = None,
     dry_run: bool = False,
     verbose: bool = False,
     quiet: bool = False,
@@ -650,6 +659,9 @@ def us(
         Crop to the moving beamform after the region crop.
     chunk_frames : int, optional
         Frames per chunk in the written arrays.
+    grayscale : bool, optional
+        None decides per clip; True forces one channel for a cohort known to
+        be B-mode only; False keeps every channel.
     dry_run : bool, optional
         Report what would be written and write nothing.
     verbose : bool, optional
@@ -692,7 +704,7 @@ def us(
             continue
         try:
             clips += convert_us_archive(
-                archive, target, min_frames, tighten, chunk_frames
+                archive, target, min_frames, tighten, chunk_frames, grayscale
             )
             converted += 1
         except (ConversionError, zipfile.BadZipFile, OSError) as exc:

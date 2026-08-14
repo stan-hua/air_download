@@ -601,3 +601,32 @@ class TestUltrasoundCohortRun:
         root = self._cohort(tmp_path)
         with pytest.raises(ValueError, match="min_frames must be at least 1"):
             us(root, tmp_path / "arrays", min_frames=0)
+
+
+class TestForcedGrayscale:
+    """A cohort known to be B-mode only should not pay for three channels."""
+
+    def test_forcing_collapses_a_clip_that_carries_colour(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"colour": True}])
+        convert_us_archive(
+            archive, tmp_path / "A0001.zarr", min_frames=20, grayscale=True
+        )
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.ndim == 3
+        assert clip.attrs["grayscale"] is True
+        assert clip.attrs["grayscale_forced"] is True
+
+    def test_auto_still_keeps_real_colour(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"colour": True}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.ndim == 4
+        assert clip.attrs["grayscale_forced"] is False
+
+    def test_forcing_off_keeps_channels_on_a_gray_clip(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"colour_mark": True}])
+        convert_us_archive(
+            archive, tmp_path / "A0001.zarr", min_frames=20, grayscale=False
+        )
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.ndim == 4

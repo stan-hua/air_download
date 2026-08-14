@@ -18,7 +18,7 @@ dependencies = [
     "tqdm>=4.60",
     "fire>=0.5",
     "pylibjpeg[libjpeg]>=2.1.0,<3",
-    "ultraml @ git+https://github.com/stan-hua/ultraml.git@3ca6dcf",
+    "ultraml>=0.2.0",
 ]
 
 [project.urls]
