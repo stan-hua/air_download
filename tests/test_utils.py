@@ -9,6 +9,7 @@ import pytest
 from air_download.utils import (
     build_date_ranges,
     build_exam_output_path,
+    converted_exam_path,
     exam_key,
     parse_datetime,
     write_exams_csv,
@@ -305,3 +306,38 @@ class TestIdentifiersAreNotNumbers:
             "mrn,accession_number\n00123456,0099\n"
         )
         assert read_accession_pairs(path) == [("00123456", "0099")]
+
+
+class TestConvertedExamPath:
+    """One rule for where a converted array lives, shared by two modules."""
+
+    def test_a_ct_archive_maps_to_a_nifti(self):
+        assert converted_exam_path(
+            Path("cohort/P0001/visit-01/ct/A0002.zip"),
+            Path("cohort"),
+            Path("arrays"),
+        ) == Path("arrays/P0001/visit-01/ct/A0002.nii.gz")
+
+    def test_an_ultrasound_archive_maps_to_a_zarr_group(self):
+        assert converted_exam_path(
+            Path("cohort/P0001/visit-01/us/A0001.zip"),
+            Path("cohort"),
+            Path("arrays"),
+        ) == Path("arrays/P0001/visit-01/us/A0001.zarr")
+
+    def test_the_relative_layout_is_preserved(self):
+        # The converted tree mirrors the cohort, which is what lets masks,
+        # frames CSVs, and the crosswalk all join on the same path.
+        out = converted_exam_path(
+            Path("/data/cohort/P0042/visit-07/ct/A0313.zip"),
+            Path("/data/cohort"),
+            Path("/other/arrays"),
+        )
+        assert out.parent == Path("/other/arrays/P0042/visit-07/ct")
+
+    def test_an_archive_outside_the_root_is_refused(self):
+        # Silently returning something would put the array in the wrong tree.
+        with pytest.raises(ValueError):
+            converted_exam_path(
+                Path("elsewhere/A0001.zip"), Path("cohort"), Path("arrays")
+            )

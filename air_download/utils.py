@@ -13,6 +13,12 @@ logger = logging.getLogger(__name__)
 # date ranges are split into windows of at most this many days.
 DEFAULT_CHUNK_DAYS = 7
 
+# What `air_convert` writes per modality. Here rather than in convert.py so
+# that `air_cohort` can find a converted exam without importing nibabel,
+# zarr, and ultraml just to learn a file extension.
+CT_ARRAY_SUFFIX = ".nii.gz"
+US_ARRAY_SUFFIX = ".zarr"
+
 _CSV_HEADER = [
     "mrn",
     "accession_number",
@@ -231,6 +237,47 @@ def build_exam_output_path(
     else:
         # User provided a filename; append index to avoid overwriting
         return p.with_name(f"{p.stem}_{exam_index + 1}{p.suffix}")
+
+
+def converted_exam_path(archive: Path, root: Path, destination: Path) -> Path:
+    """Map a downloaded archive to where its converted array belongs.
+
+    Both halves of the pipeline need this rule: ``air_convert`` writes to it,
+    and ``air_cohort`` reads it to decide whether an exam is already done and
+    can be skipped. It lives here so the writer and the reader cannot drift --
+    if they did, a resumed run would re-download every exam it had already
+    converted.
+
+    The suffix follows the modality folder, because that is what the cohort
+    layout guarantees: ``ct/`` holds one volume and ``us/`` holds one group of
+    clips. An archive outside either is treated as ultrasound, matching
+    ``air_convert us`` being the operation with no assembly step.
+
+    Parameters
+    ----------
+    archive : Path
+        A ``.zip`` inside ``root``.
+    root : Path
+        Root of the downloaded cohort.
+    destination : Path
+        Root of the converted tree.
+
+    Returns
+    -------
+    Path
+        Where the converted array for ``archive`` lives.
+
+    Examples
+    --------
+    >>> converted_exam_path(
+    ...     Path("c/P0001/visit-01/ct/A0002.zip"), Path("c"), Path("a")
+    ... ).as_posix()
+    'a/P0001/visit-01/ct/A0002.nii.gz'
+    """
+    relative = Path(archive).relative_to(root)
+    suffix = CT_ARRAY_SUFFIX if relative.parent.name == "ct" else US_ARRAY_SUFFIX
+    target = (Path(destination) / relative).with_suffix("")
+    return target.with_name(target.name + suffix)
 
 
 def write_exams_csv(
