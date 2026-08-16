@@ -369,8 +369,10 @@ built on the `us_ct/` subpackage. They have their own guide:
 **→ [Building a FAST-CT cohort](docs/us-ct-cohort.md)**
 
 It covers `air_match`, `air_cohort`, the pseudonym crosswalk, and
-`air_convert`, and ends with the exact commands used to build the reference
-cohort.
+`air_convert`, and ends with
+[the commands to run the whole thing](docs/us-ct-cohort.md#running-the-pipeline)
+— developing against a handful of pairs, scaling to a full cohort without
+filling the disk, and optionally syncing the result to a GPU host.
 
 ### Counting frames, and keeping only the real cine clips
 

@@ -17,6 +17,11 @@ in the main README for how to produce them.
 | 3. Download | `pixi run download-cohort` | `P0001/visit-01/{us,ct}/A0001.zip` + crosswalk |
 | 4. Inspect | `pixi run frames inspect` | `frames.csv`, frame counts per instance |
 | 5. Convert | `pixi run convert ct` / `us` | `.nii.gz` volumes and `.zarr` clips |
+| 6. Sync *(optional)* | `rsync` | the arrays on a GPU host |
+
+Jump to [**Running the pipeline**](#running-the-pipeline) for the commands.
+Step 6 is only for people whose GPUs are on a different machine; if you train
+where you downloaded, stop at step 5.
 
 > **Everything past step 3 is pseudonymous.** No MRN, accession number, or
 > visit date appears in any path or derived CSV. The crosswalk written beside
@@ -221,7 +226,7 @@ A series whose slices disagree on size or orientation, or that holds two slices 
 
 > **Ultrasound burns patient details into the banner around the image.** `BurnedInAnnotation` (0028,0301) is optional and routinely absent, so it cannot be used to decide whether that happened — assume it did. Cropping to `SequenceOfUltrasoundRegions`, the scanner's own statement of which pixels are image, removes it deterministically. That crop always runs **first**, and the beamform crop only ever runs inside it: mask growing follows connected bright pixels, so on a full frame it could in principle reach the banner, whereas after the crop there is no banner left to reach. An instance that declares no region is refused rather than falling back to the whole frame.
 
-Arrays are chunked eight frames at a time, zstd level 9. That is measured, not guessed: one frame per chunk stores 38% of raw against 22% for eight, because a single frame is too small a window for zstd to find the redundancy consecutive cine frames obviously have. Reading one random frame costs about 3 ms, and a model fed a window of consecutive frames reads a whole chunk anyway.
+Arrays are chunked eight frames at a time by default, zstd level 9. That is measured, not guessed: one frame per chunk stores 38% of raw against 22% for eight, because a single frame is too small a window for zstd to find the redundancy consecutive cine frames obviously have. Reading one random frame costs about 3 ms, and a model fed a window of consecutive frames reads a whole chunk anyway. `--letterbox` raises the default to 32, since the frames it writes are much smaller — see below.
 
 ```python
 import zarr
@@ -245,15 +250,83 @@ Native clips are large and non-square. Measured over a real 25-exam cohort: heig
 
 **Letterboxing is both cheaper and undistorted**, which is not the trade-off it looks like. Squashing a 1.25:1 clip into a square stretches anatomy by a quarter *and* invents 20% more real pixels to store, while the padding a letterbox adds compresses to almost nothing. The bars are not a new artifact either: everything outside the beamform is already zero, so they continue the background.
 
-Two details worth knowing. A clip smaller than the target is padded but **never scaled up** — inventing detail to fill a frame costs space and buys nothing. And `chunk_frames` defaults to 32 rather than 8 when letterboxing, because a 256×256 frame is a fraction of the size and a chunk should stay a few megabytes: measured, that is 48 files per exam instead of 159, for 2.6% less space. File count matters when the tree has to be copied to a GPU host.
+Two details worth knowing. A clip smaller than the target is padded but **never scaled up** — inventing detail to fill a frame costs space and buys nothing. And `chunk_frames` defaults to 32 rather than 8 when letterboxing, because a 256×256 frame is a fraction of the size and a chunk should stay a few megabytes: measured on the reference cohort, that is 49 files per exam instead of 160, for 2.6% less space. File count matters when the tree has to be copied to a GPU host.
 
 `letterbox_scale` and `letterbox_offset` are recorded per clip, since the region and beamform boxes alone no longer locate a source pixel once a clip has been rescaled and centred.
 
-### Batched ingest, and deleting the archives
+### Verifying, and deleting the archive that was consumed
 
-Source archives are roughly five times the size of what they convert into, so a long run should not accumulate them. `--delete_source` removes each archive once its output has been written **and re-opened** — `air_convert` verifies its own work, because nothing downstream re-reads these files and a truncated write otherwise looks like success.
+`air_convert` re-opens what it just wrote and checks it — the shape of a
+volume, and one chunk of every clip. Nothing downstream re-reads these files
+before the archive is deleted, so a truncated write, a full disk, or a
+half-flushed gzip stream would all otherwise look exactly like success.
 
-That only works if resume stops keying on the `.zip`, which is gone by design. `--converted_dir` points `air_cohort` at the converted tree, so an exam that already has a volume or a clip group is skipped without a download:
+That check is what makes `--delete_source` safe, and the two together are what
+let a full cohort run without ever holding more than one batch of archives.
+See [Scaling up without filling the disk](#scaling-up-without-filling-the-disk).
+
+On WSL, batching is not only a headroom question: the `ext4.vhdx` grows to its
+high-water mark and **never shrinks on its own**, so downloading everything
+before converting leaves the virtual disk permanently sized for archives that
+no longer exist.
+
+---
+
+## Running the pipeline
+
+### Getting a matched CSV
+
+Search each modality into its own directory, then pair them. `--max_hours`
+defaults to 48, so the flag is optional:
+
+```bash
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" \
+    -ds 2021-01-01 -de 2023-12-31 -o output-ct_abdomen_pelvis/
+pixi run search -m US -d "US ED BEDSIDE" \
+    -ds 2021-01-01 -de 2023-12-31 -o output-us_ed_bedside/
+
+pixi run match --us_csv output-us_ed_bedside/accessions.csv \
+               --ct_csv output-ct_abdomen_pelvis/accessions.csv \
+               --output matched_us_ct.csv
+```
+
+### Developing against a handful of pairs
+
+Work out your thresholds on a small cohort first. Either cut the matched CSV
+down to a few rows, or keep the full one and let `--n` take the first few —
+rows are sorted before `--n` slices them, so the same pairs are chosen and
+numbered identically whether you take 25 or all of them. **The small run is
+therefore not thrown away**: scaling up reuses every identifier already
+assigned and skips every exam already fetched.
+
+```bash
+# Preview. No network call, nothing written, and the printed paths carry
+# no identifiers, so they are safe to paste into a ticket.
+pixi run download-cohort --matched_csv matched_us_ct-test.csv \
+    --output cohort/ --dry_run
+
+# Download.
+pixi run download-cohort --matched_csv matched_us_ct-test.csv \
+    --output cohort/ --cred_path ~/air_login.txt
+
+# Look at the frame distribution before settling on a threshold. This only
+# reports -- it filters nothing.
+pixi run frames inspect --input cohort/ --output frames.csv --min_frames 20
+
+# Convert. CT assembles into volumes, US separates into clips.
+pixi run convert ct --input cohort/ --output_dir arrays/
+pixi run convert us --input cohort/ --output_dir arrays/ \
+    --min_frames 20 --grayscale True --letterbox 256
+```
+
+You now have `arrays/P0001/visit-01/{ct/A0002.nii.gz, us/A0001.zarr}` and a
+crosswalk at `cohort_crosswalk.csv`, beside the tree rather than inside it.
+
+### Scaling up without filling the disk
+
+The archives are roughly five times the size of what they convert into, so a
+full cohort should not keep them all at once. Downloading in batches and
+converting after each one bounds peak disk at a single batch:
 
 ```bash
 for limit in $(seq 200 200 6000); do
@@ -265,62 +338,69 @@ for limit in $(seq 200 200 6000); do
 done
 ```
 
-Peak disk stays at one batch of archives rather than the whole cohort. On WSL that is not only a headroom question: the `ext4.vhdx` grows to its high-water mark and **never shrinks on its own**, so an unbatched run leaves the virtual disk permanently sized for archives that no longer exist.
+`--converted_dir` is what makes this resumable. Without it, `--skip_existing`
+looks for the `.zip` that `--delete_source` just removed, decides the exam was
+never fetched, and downloads the whole cohort again.
 
-A failed conversion keeps its archive — at that point it is the only copy, and deleting it would mean pulling the exam again.
+Two flags do the work, and both are off by default because neither is
+reversible without another download:
 
----
+- **`--delete_source`** removes each archive once its output has been written
+  **and re-opened**. `air_convert` verifies its own work — nothing downstream
+  re-reads these files, so a truncated write would otherwise look exactly like
+  success. A failed conversion keeps its archive, since at that point it is the
+  only copy.
+- **`--converted_dir`** skips an exam that already has a volume or a clip
+  group, without a network call.
 
-## The commands used to build the reference cohort
+Interrupt it whenever you like; re-running picks up where it stopped.
 
-The 25-pair verification cohort, end to end. `--n` is what keeps it a
-verification cohort: drop it and the same commands download all 5983 pairs
-into the same tree, reusing every identifier already assigned.
+> A CT matched to two ultrasounds is copied into both visits. Within one batch
+> that copy is free; across batches the first visit's archive is already gone,
+> so the CT is fetched a second time. On a real cohort that was ~90 exams out
+> of ~12 000 — measured, and not worth a second code path.
+
+### Optional: syncing to a GPU host
+
+Only if you train somewhere other than where you downloaded. The converted
+tree is the thing to move; the archives are already gone, and the crosswalk
+must not travel:
 
 ```bash
-# 1. Search each modality into its own directory, over 2021-2023.
-pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" \
-    -ds 2021-01-01 -de 2023-12-31 -o output-ct_abdomen_pelvis/
-pixi run search -m US -d "US ED BEDSIDE" \
-    -ds 2021-01-01 -de 2023-12-31 -o output-us_ed_bedside/
-
-# 2. Pair them. 48 hours is the default now, so the flag is optional.
-pixi run match --us_csv output-us_ed_bedside/accessions.csv \
-               --ct_csv output-ct_abdomen_pelvis/accessions.csv \
-               --output matched_us_ct-48h.csv
-
-# 3. Verify the layout on one pair before committing to the whole cohort.
-pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
-    --output cohort-test25/ --dry_run
-pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
-    --output cohort-test25/ --cred_path ~/air_login.txt --n 1
-
-# 4. Download 25 pairs. Rows are sorted before --n slices them, so this takes
-#    the same 25 the full run would number first. Archives already present are
-#    skipped and identifiers already assigned are reused, so step 3 is not
-#    repeated and nobody is filed twice.
-pixi run download-cohort --matched_csv matched_us_ct-48h.csv \
-    --output cohort-test25/ --cred_path ~/air_login.txt --n 25
-
-# 5. Look at the frame distribution before settling on a threshold.
-pixi run frames inspect --input cohort-test25/ \
-    --output cohort-test25-frames.csv --min_frames 20
-
-# 6. Convert. CT assembles into volumes, US separates into clips.
-pixi run convert ct --input cohort-test25/ --output_dir cohort-arrays/
-pixi run convert us --input cohort-test25/ --output_dir cohort-arrays/ \
-    --min_frames 20 --grayscale True
+rsync -a --info=progress2 arrays/ gpu-host:/data/fast_ct/arrays/
 ```
 
-### What that produced
+> **Never sync the crosswalk.** It is the only file that maps `P0001`/`A0001`
+> back to a real patient, and a GPU host is usually a different trust
+> boundary. Syncing `arrays/` reaches it only if you put it there, which is
+> why `air_cohort` refuses a crosswalk path inside the cohort in the first
+> place. Everything the training job needs joins on `anon_mrn` and
+> `anon_accession_number` alone.
+
+Ultrasound at `--letterbox 256` is about 13 MB per exam, so a 6000-pair cohort
+is roughly 77 GB over the wire. CT volumes are about 66 MB each; if the GPU
+host only needs embeddings, run the segmentation and encoder there in batches
+and keep the volumes at home rather than syncing ~390 GB.
+
+### What the reference cohort produced
+
+Measured on 25 pairs, and the per-exam figures are what to multiply when
+planning storage for a larger cohort.
 
 | | |
 | --- | --- |
 | Patients | 25 |
-| Archives | 50 (25 US, 25 CT), 4.3 GB |
+| Archives | 50 (25 US, 25 CT), 4.3 GB — deleted after conversion |
 | CT | 195-319 slices each, 512x512, 2 mm, one series per exam |
 | US | 203 instances, 197 of them clips of 20+ frames |
 | Frames | 6107 CT slices, 29 834 ultrasound frames |
+| CT volumes | 66 MB per exam (55-90) |
+| US clips, native | 119 MB per exam |
+| US clips, `--letterbox 256` | **13 MB per exam**, 49 files |
+
+At those rates a 6000-pair cohort is about 390 GB of CT and 77 GB of
+ultrasound. The archives that produced them would have been over a terabyte,
+which is the argument for `--delete_source`.
 
 **Why `--min_frames 20`.** The distribution splits cleanly. Across 6107
 instances, nothing at all fell between 2 and 19 frames: an instance is either a
