@@ -173,6 +173,16 @@ The ultrasound half of `convert.py` is where de-identification actually happens,
 - **Apply the mask, not just its bounding box.** A ~24x26 static coloured vendor mark sits inside the region box on every frame, and it was enough to push 190 of 197 grayscale clips into three-channel storage. Masking removes it, halves the size, and makes the grayscale test clean. The dark pixels this discards are background outside the sector, not anechoic fluid inside it — filling the mask's interior holes first recovers almost none of them (measured: 25.2% of faint pixels excluded against 22.9%), which matters because free fluid is exactly what a FAST looks for.
 - **Chunk eight frames, zstd level 9, no shuffle.** Measured: one frame per chunk stores 38% of raw, eight frames at clevel 9 stores 22%, and the gain needs both — clevel 9 alone at one frame reaches only 35%. Bitshuffle was measured and dropped as slightly larger and slower on 8-bit speckle.
 - `pixel_array` is three-dimensional for **both** a grayscale multi-frame clip and a colour still, so the **frame count** decides whether there is a time axis, never `ndim`. Getting this wrong gave every clip a bogus leading axis.
+- **`--letterbox` pads, never squashes, and that is the cheaper option.** Clips are systematically ~1.25:1 (measured median 729x598) because a sector is wider than it is deep, so squashing to a square stretches anatomy by a quarter *and* stores 20% more real pixels — measured at 256, letterboxing is 13.0 MB/exam against 17.2 squashed. The padding costs almost nothing to compress and is not a new artifact, since everything outside the beamform is already zero. A clip smaller than the target is padded but **never upscaled**. `letterbox_scale`/`letterbox_offset` go into `.attrs` because the region and beamform boxes stop locating a source pixel once a clip is rescaled and centred.
+- `chunk_frames` defaults to 32 when letterboxing and 8 otherwise: a chunk should stay a few megabytes, and at 256 that is 48 files per exam instead of 159 for 2.6% less space. The file count is the point — the tree gets copied to a GPU host.
+
+### Deleting archives, and what makes that safe (`convert.py`, `cohort.py`)
+
+Source archives are ~5x the size of what they convert into, so a long ingest deletes as it goes. Three things make that safe, and removing any one of them turns a crash into a re-download of the cohort:
+
+- **`convert` verifies its own output.** `verify_ct_output` / `verify_us_output` re-open the written file and check shape (and touch one chunk per clip) before anything is deleted. Nothing downstream re-reads these files, so a truncated write would otherwise look exactly like success. `--delete_source` is only ever reached after the verifier returns.
+- **A failed conversion keeps its archive.** At that point it is the only copy.
+- **Resume keys on the converted array, not the `.zip`.** `air_cohort --converted_dir` consults `converted_exam_path`; the archive is gone by design, so `path.exists()` would re-download everything. That mapping lives in `utils.py` rather than `convert.py` specifically so `cohort.py` can use it without importing nibabel, zarr, and ultraml to learn a file extension — and so the writer and the reader cannot drift.
 
 ### Configuration resolution
 

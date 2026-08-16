@@ -231,6 +231,44 @@ frame = clip[7]                    # one frame, without touching the rest
 clip.attrs["region_box"]           # what was cropped away, and why
 ```
 
+### `--letterbox`: storing at the size a model actually reads
+
+Native clips are large and non-square. Measured over a real 25-exam cohort: height 191–599, width 278–796, **median 729×598, about 1.25:1**. That shape is not noise — the beamform crop returns a tight box around the sector, and a sector is wider than it is deep.
+
+`--letterbox 256` scales the long side to 256 and zero-pads the short one, giving uniform `(frames, 256, 256)` arrays that batch without a per-item resize. Measured across all 197 clips of the reference cohort, projected to a 5957-exam cohort:
+
+| Stored as | Per exam | Whole cohort |
+| --- | ---: | ---: |
+| native | 118.8 MB | 708 GB |
+| squashed to 256×256 | 17.2 MB | 103 GB |
+| **letterboxed to 256×256** | **13.0 MB** | **77 GB** |
+
+**Letterboxing is both cheaper and undistorted**, which is not the trade-off it looks like. Squashing a 1.25:1 clip into a square stretches anatomy by a quarter *and* invents 20% more real pixels to store, while the padding a letterbox adds compresses to almost nothing. The bars are not a new artifact either: everything outside the beamform is already zero, so they continue the background.
+
+Two details worth knowing. A clip smaller than the target is padded but **never scaled up** — inventing detail to fill a frame costs space and buys nothing. And `chunk_frames` defaults to 32 rather than 8 when letterboxing, because a 256×256 frame is a fraction of the size and a chunk should stay a few megabytes: measured, that is 48 files per exam instead of 159, for 2.6% less space. File count matters when the tree has to be copied to a GPU host.
+
+`letterbox_scale` and `letterbox_offset` are recorded per clip, since the region and beamform boxes alone no longer locate a source pixel once a clip has been rescaled and centred.
+
+### Batched ingest, and deleting the archives
+
+Source archives are roughly five times the size of what they convert into, so a long run should not accumulate them. `--delete_source` removes each archive once its output has been written **and re-opened** — `air_convert` verifies its own work, because nothing downstream re-reads these files and a truncated write otherwise looks like success.
+
+That only works if resume stops keying on the `.zip`, which is gone by design. `--converted_dir` points `air_cohort` at the converted tree, so an exam that already has a volume or a clip group is skipped without a download:
+
+```bash
+for limit in $(seq 200 200 6000); do
+  pixi run download-cohort --matched_csv matched_us_ct.csv --output cohort/ \
+      --converted_dir arrays/ --n $limit --cred_path ~/air_login.txt
+  pixi run convert ct --input cohort/ --output_dir arrays/ --delete_source
+  pixi run convert us --input cohort/ --output_dir arrays/ \
+      --min_frames 20 --grayscale True --letterbox 256 --delete_source
+done
+```
+
+Peak disk stays at one batch of archives rather than the whole cohort. On WSL that is not only a headroom question: the `ext4.vhdx` grows to its high-water mark and **never shrinks on its own**, so an unbatched run leaves the virtual disk permanently sized for archives that no longer exist.
+
+A failed conversion keeps its archive — at that point it is the only copy, and deleting it would mean pulling the exam again.
+
 ---
 
 ## The commands used to build the reference cohort
