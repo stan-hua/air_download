@@ -62,7 +62,7 @@ from air_download.crosswalk import (
     parse_anon_ids,
 )
 from air_download.filters import DEFAULT_AXIAL_PATTERNS
-from air_download.utils import configure_logging, parse_datetime
+from air_download.utils import configure_logging, converted_exam_path, parse_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +239,15 @@ def _fetch_exam(
     skip_existing: bool,
     downloaded: dict[tuple[str, str], Path],
     dedupe_key: tuple[str, str],
+    converted: Path | None = None,
 ) -> str:
     """Place one exam's archive at ``path``, returning what it took to do so."""
+    # An archive deleted after conversion must not be downloaded again. The
+    # converted array is the evidence the exam is done, and it is the only
+    # evidence left once `air_convert --delete_source` has run.
+    if skip_existing and converted is not None and converted.exists():
+        return "skipped"
+
     if path.exists():
         if skip_existing and path.stat().st_size > 0:
             return "skipped"
@@ -302,6 +309,7 @@ def download_cohort(
     matched_csv: str | Path,
     output: str | Path,
     crosswalk_csv: str | Path | None = None,
+    converted_dir: str | Path | None = None,
     n: int | None = None,
     url: str | None = None,
     cred_path: str | Path | None = None,
@@ -337,6 +345,13 @@ def download_cohort(
         Where the pseudonym mapping lives. Defaults to ``<output>_crosswalk.csv``
         beside the cohort. A path inside ``output`` is refused, so archiving
         the cohort cannot ship the key with the lock.
+    converted_dir : str or Path, optional
+        Root of the tree ``air_convert`` writes. When given, an exam whose
+        converted array is already there is skipped without downloading.
+        This is what makes a batched ingest resumable: once
+        ``air_convert --delete_source`` has removed an archive, its converted
+        array is the only remaining evidence the exam was ever fetched, and
+        without this the next run would download the whole cohort again.
     n : int, optional
         Download only the first ``n`` visits, ordered as they will be
         numbered. Use it to verify one visit before committing to the whole
@@ -400,6 +415,8 @@ def download_cohort(
         logger.warning("No usable rows in %s; nothing to download.", matched_csv)
         return
 
+    converted_root = None if converted_dir is None else Path(converted_dir)
+
     _warn_about_a_pre_pseudonym_tree(output)
     crosswalk = Crosswalk(crosswalk_path, read_only=dry_run)
     downloaded: dict[tuple[str, str], Path] = {}
@@ -452,6 +469,11 @@ def download_cohort(
                     skip_existing=skip_existing,
                     downloaded=downloaded,
                     dedupe_key=parse_anon_ids(path.relative_to(output)),
+                    converted=(
+                        None
+                        if converted_root is None
+                        else converted_exam_path(path, output, converted_root)
+                    ),
                 )
                 counts[outcome] += 1
             except Exception as exc:  # noqa: BLE001 - one bad exam is not fatal

@@ -583,6 +583,104 @@ class TestTheCrosswalk:
         assert "00123456" not in caplog.text
 
 
+class TestResumingFromTheConvertedTree:
+    """Once an archive is deleted, its converted array is the only evidence.
+
+    Batched ingest converts and then deletes each archive, so resume cannot
+    key on the ``.zip``: it is gone by design. Without this the next run would
+    re-download the whole cohort.
+    """
+
+    def _converted(self, arrays: Path, *, us: bool = True, ct: bool = True) -> None:
+        """Stand in for what air_convert would have written."""
+        visit = arrays / "P0001" / "visit-01"
+        if us:
+            (visit / "us" / "A0001.zarr").mkdir(parents=True, exist_ok=True)
+        if ct:
+            (visit / "ct").mkdir(parents=True, exist_ok=True)
+            (visit / "ct" / "A0002.nii.gz").write_bytes(b"nifti")
+
+    def test_a_converted_exam_is_not_downloaded_again(self, tmp_path, stub_client):
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        arrays = tmp_path / "arrays"
+        self._converted(arrays)
+
+        download_cohort(
+            matched_csv=csv_path,
+            output=tmp_path / "out",
+            converted_dir=arrays,
+        )
+        assert stub_client.instances[0].calls == []
+
+    def test_the_archive_being_gone_does_not_trigger_a_download(
+        self, tmp_path, stub_client
+    ):
+        # The whole point: no .zip on disk, and still nothing is fetched.
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        arrays = tmp_path / "arrays"
+        self._converted(arrays)
+        out = tmp_path / "out"
+
+        download_cohort(matched_csv=csv_path, output=out, converted_dir=arrays)
+        assert not (out / "P0001" / "visit-01" / "us" / "A0001.zip").exists()
+        assert stub_client.instances[0].calls == []
+
+    def test_only_the_converted_half_is_skipped(self, tmp_path, stub_client):
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        arrays = tmp_path / "arrays"
+        self._converted(arrays, us=True, ct=False)
+
+        download_cohort(
+            matched_csv=csv_path,
+            output=tmp_path / "out",
+            converted_dir=arrays,
+        )
+        calls = stub_client.instances[0].calls
+        assert [c["accession"] for c in calls] == ["C1"]
+
+    def test_without_the_flag_nothing_changes(self, tmp_path, stub_client):
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        self._converted(tmp_path / "arrays")
+
+        download_cohort(matched_csv=csv_path, output=tmp_path / "out")
+        assert len(stub_client.instances[0].calls) == 2
+
+    def test_skip_existing_off_re_downloads_a_converted_exam(
+        self, tmp_path, stub_client
+    ):
+        # --skip_existing is the one switch that means "fetch it anyway".
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        arrays = tmp_path / "arrays"
+        self._converted(arrays)
+
+        download_cohort(
+            matched_csv=csv_path,
+            output=tmp_path / "out",
+            converted_dir=arrays,
+            skip_existing=False,
+        )
+        assert len(stub_client.instances[0].calls) == 2
+
+    def test_identifiers_are_still_assigned_for_a_skipped_exam(
+        self, tmp_path, stub_client
+    ):
+        # Skipping the download must not skip the crosswalk, or a resumed
+        # run would renumber the cohort.
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+        arrays = tmp_path / "arrays"
+        self._converted(arrays)
+        cw = tmp_path / "cw.csv"
+
+        download_cohort(
+            matched_csv=csv_path,
+            output=tmp_path / "out",
+            crosswalk_csv=cw,
+            converted_dir=arrays,
+        )
+        rows = list(csv.DictReader(cw.open()))
+        assert {r["anon_accession_number"] for r in rows} == {"A0001", "A0002"}
+
+
 class TestNoIdentifiersReachTheOutputTree:
     """The strongest guarantee here: grep the whole tree and find nothing."""
 
