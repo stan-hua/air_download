@@ -68,6 +68,10 @@ pydicom = ">=3.0.2,<4"
 nibabel = ">=5.4.2,<6"
 zarr = ">=3.3.0,<4"
 numcodecs = ">=0.16.5,<0.17"
+# Letterboxing rescales every ultrasound frame. Arrived transitively via
+# ultraml until convert.py started calling cv2 directly; named here so a
+# change upstream cannot quietly remove it.
+py-opencv = ">=4.9,<6"
 
 # Installs the package itself (and its `air_download` console script) in
 # editable mode, so source edits take effect without a reinstall.

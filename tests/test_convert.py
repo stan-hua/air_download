@@ -24,6 +24,7 @@ from air_download.us_ct.convert import (
     convert_us_archive,
     ct,
     is_grayscale,
+    letterbox_frames,
     read_series,
     region_box,
     slice_positions,
@@ -632,6 +633,116 @@ class TestForcedGrayscale:
         )
         clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
         assert clip.ndim == 4
+
+
+class TestLetterbox:
+    """Fit a clip into a square without stretching the anatomy."""
+
+    def test_output_is_square_at_the_requested_size(self):
+        out, _scale, _offset = letterbox_frames(
+            np.full((5, 40, 80), 200, np.uint8), 64
+        )
+        assert out.shape == (5, 64, 64)
+
+    def test_aspect_ratio_survives(self):
+        # 40x80 is 1:2, so at size 64 the content must be 32x64, not 64x64.
+        out, scale, (y0, x0) = letterbox_frames(
+            np.full((3, 40, 80), 200, np.uint8), 64
+        )
+        assert scale == pytest.approx(0.8)
+        assert (y0, x0) == (16, 0)
+        rows = np.where(out[0].any(axis=1))[0]
+        assert (rows.min(), rows.max()) == (16, 47)
+
+    def test_the_padding_is_zero(self):
+        out, _scale, (y0, _x0) = letterbox_frames(
+            np.full((2, 40, 80), 200, np.uint8), 64
+        )
+        assert out[:, :y0, :].max() == 0
+        assert out[:, y0 + 32 :, :].max() == 0
+
+    def test_a_square_clip_is_not_padded(self):
+        out, scale, offset = letterbox_frames(np.full((2, 50, 50), 9, np.uint8), 25)
+        assert offset == (0, 0)
+        assert scale == pytest.approx(0.5)
+        assert out.min() == 9
+
+    def test_a_small_clip_is_padded_but_never_upscaled(self):
+        # Inventing detail to fill the frame costs space and buys nothing.
+        out, scale, (y0, x0) = letterbox_frames(
+            np.full((2, 10, 20), 200, np.uint8), 64
+        )
+        assert scale == 1.0
+        assert (y0, x0) == (27, 22)
+        assert int(out[0].sum()) == 10 * 20 * 200
+
+    def test_a_colour_clip_keeps_its_channels(self):
+        out, _scale, _offset = letterbox_frames(
+            np.full((2, 40, 80, 3), 200, np.uint8), 64
+        )
+        assert out.shape == (2, 64, 64, 3)
+
+    def test_conversion_writes_uniform_square_clips(self, tmp_path):
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{}, {"n_frames": 40, "moving": True}]
+        )
+        convert_us_archive(
+            archive,
+            tmp_path / "A0001.zarr",
+            min_frames=20,
+            grayscale=True,
+            letterbox=64,
+        )
+        group = zarr.open_group(tmp_path / "A0001.zarr", mode="r")
+        shapes = {group[k].shape[1:] for k in group.array_keys()}
+        assert shapes == {(64, 64)}
+
+    def test_the_geometry_needed_to_map_back_is_recorded(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(
+            archive,
+            tmp_path / "A0001.zarr",
+            min_frames=20,
+            grayscale=True,
+            letterbox=64,
+        )
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        # The boxes alone no longer locate a pixel once it has been rescaled
+        # and centred, so the scale and offset have to travel with it.
+        assert clip.attrs["letterbox"] == 64
+        assert clip.attrs["letterbox_scale"] > 0
+        assert len(clip.attrs["letterbox_offset"]) == 2
+
+    def test_not_letterboxing_leaves_the_attributes_neutral(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
+        assert clip.attrs["letterbox"] is None
+        assert clip.attrs["letterbox_scale"] == 1.0
+
+    def test_a_size_below_one_is_refused(self, tmp_path):
+        root = tmp_path / "cohort" / "P0001" / "visit-01" / "us"
+        make_us_archive(root / "A0001.zip", [{}])
+        with pytest.raises(ValueError, match="letterbox must be at least 1"):
+            us(tmp_path / "cohort", tmp_path / "arrays", letterbox=0)
+
+    def test_chunking_grows_when_frames_shrink(self, tmp_path):
+        # A letterboxed frame is a fraction of the size, so an 8-frame chunk
+        # would be a few hundred kilobytes and multiply the file count.
+        root = tmp_path / "cohort" / "P0001" / "visit-01" / "us"
+        make_us_archive(root / "A0001.zip", [{"n_frames": 40}])
+        us(
+            tmp_path / "cohort",
+            tmp_path / "arrays",
+            min_frames=20,
+            grayscale=True,
+            letterbox=64,
+        )
+        clip = zarr.open_group(
+            tmp_path / "arrays" / "P0001" / "visit-01" / "us" / "A0001.zarr",
+            mode="r",
+        )["clip-0000"]
+        assert clip.chunks[0] == 32
 
 
 class TestVerifiesItsOwnOutput:

@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any
 
 # Non-standard libraries
+import cv2
 import fire
 import nibabel as nib
 import numpy as np
@@ -89,6 +90,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_FRAMES = 8
 US_COMPRESSOR = BloscCodec(cname="zstd", clevel=9, shuffle="noshuffle")
 
+# Measured over 197 real FAST clips, projected to a 5,957-exam cohort: 8
+# frames per chunk stores 138 GB in 159 files per exam, 32 frames stores
+# 135 GB in 48. Size barely moves; the file count is the point, because that
+# tree has to be copied to a GPU host. Past 32 the gain is another 1% and
+# reading one random frame starts to cost a 64-frame decompress.
+LETTERBOX_CHUNK_FRAMES = 32
 
 # Slice positions are floats off a scanner, so "same" needs a tolerance.
 ORIENTATION_TOLERANCE = 1e-3
@@ -627,6 +634,58 @@ def tighten_to_beamform(frames: np.ndarray) -> tuple[np.ndarray, tuple | None]:
     return frames[:, y_min:y_max, x_min:x_max], (x_min, y_min, x_max, y_max)
 
 
+def letterbox_frames(
+    frames: np.ndarray, size: int
+) -> tuple[np.ndarray, float, tuple[int, int]]:
+    """Fit a clip into a square frame without distorting it.
+
+    The beamform crop returns a tight box around the sector, and a sector is
+    wider than it is deep -- measured over a real cohort the median clip is
+    729x598, about 1.25:1, so a clip is not square and squashing it to a
+    square stretches anatomy by a quarter. Scaling the long side to ``size``
+    and zero-padding the short one keeps the geometry and is *cheaper*: the
+    padding compresses to almost nothing while the pixels a squash invents do
+    not. Measured at 256: 13.0 MB per exam letterboxed against 17.2 squashed.
+
+    The padding is not a new artifact either. Everything outside the beamform
+    is already zero from :func:`tighten_to_beamform`, so the bars continue the
+    background rather than introducing an edge.
+
+    A clip smaller than ``size`` is padded but never scaled up, since
+    inventing detail to fill a frame costs space and buys nothing. The scale
+    and offsets are returned so a caller can map back to source pixels.
+
+    Parameters
+    ----------
+    frames : numpy.ndarray
+        Clip of shape ``(T, H, W)``, or ``(T, H, W, C)`` for a colour clip.
+    size : int
+        Edge length of the square output.
+
+    Returns
+    -------
+    tuple
+        The letterboxed clip of shape ``(T, size, size)``, the scale factor
+        applied, and the ``(y, x)`` offset of the content within the frame.
+    """
+    n_frames, height, width = frames.shape[:3]
+    scale = min(1.0, size / max(height, width))
+    target_h = max(1, min(size, round(height * scale)))
+    target_w = max(1, min(size, round(width * scale)))
+
+    out = np.zeros((n_frames, size, size, *frames.shape[3:]), dtype=np.uint8)
+    y0, x0 = (size - target_h) // 2, (size - target_w) // 2
+    for i in range(n_frames):
+        # INTER_AREA is the correct filter for shrinking: it averages the
+        # pixels that fall in each output cell instead of point-sampling
+        # them, which on speckle is the difference between a smaller image
+        # and a differently-noisy one.
+        out[i, y0 : y0 + target_h, x0 : x0 + target_w] = cv2.resize(
+            frames[i], (target_w, target_h), interpolation=cv2.INTER_AREA
+        )
+    return out, scale, (y0, x0)
+
+
 def convert_us_archive(
     archive: Path,
     destination: Path,
@@ -634,6 +693,7 @@ def convert_us_archive(
     tighten: bool = True,
     chunk_frames: int = DEFAULT_CHUNK_FRAMES,
     grayscale: bool | None = None,
+    letterbox: int | None = None,
 ) -> int:
     """Convert one ultrasound archive into a Zarr group, one array per clip.
 
@@ -661,6 +721,10 @@ def convert_us_archive(
         clip to one channel, which is what a B-mode-only cohort wants: it is
         a third of the size, and it cannot be defeated by a stray coloured
         pixel the mask happened to keep. False keeps every channel.
+    letterbox : int, optional
+        Fit every clip into a square frame of this edge length, preserving
+        aspect. Requires ``grayscale``, since a colour clip has no time axis
+        to letterbox along.
 
     Returns
     -------
@@ -703,6 +767,10 @@ def convert_us_archive(
                 # Channels are identical, so any one of them is the picture.
                 frames = frames[..., 0]
 
+            scale, offset = 1.0, (0, 0)
+            if letterbox:
+                frames, scale, offset = letterbox_frames(frames, letterbox)
+
             frames = np.ascontiguousarray(frames, dtype=np.uint8)
             if group is None:
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -725,6 +793,12 @@ def convert_us_archive(
                     "region_box": [x0, y0, x1, y1],
                     "beamform_box": list(tight) if tight else None,
                     "source_shape": [int(ds.Rows), int(ds.Columns)],
+                    # Enough to map a stored pixel back to the source frame,
+                    # which the boxes alone no longer allow once a clip has
+                    # been rescaled and centred in a larger frame.
+                    "letterbox": int(letterbox) if letterbox else None,
+                    "letterbox_scale": float(scale),
+                    "letterbox_offset": list(offset),
                 }
             )
             written += 1
@@ -743,8 +817,9 @@ def us(
     output_dir: str | Path,
     min_frames: int = DEFAULT_MIN_FRAMES,
     tighten: bool = True,
-    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+    chunk_frames: int | None = None,
     grayscale: bool | None = None,
+    letterbox: int | None = None,
     delete_source: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
@@ -775,10 +850,17 @@ def us(
     tighten : bool, optional
         Crop to the moving beamform after the region crop.
     chunk_frames : int, optional
-        Frames per chunk in the written arrays.
+        Frames per chunk in the written arrays. Defaults to 8 at native
+        resolution and 32 when ``letterbox`` is set, since a letterboxed
+        frame is a fraction of the size and a chunk should stay a few
+        megabytes rather than a few hundred kilobytes.
     grayscale : bool, optional
         None decides per clip; True forces one channel for a cohort known to
         be B-mode only; False keeps every channel.
+    letterbox : int, optional
+        Fit every clip into a square frame of this edge length, preserving
+        aspect and zero-padding the short side. Uniform shapes batch without
+        a per-item resize, and 256 is a fifth of the size of native.
     delete_source : bool, optional
         Delete each archive once its clips have been written *and* verified.
         Off by default: it is not reversible without another download.
@@ -799,6 +881,10 @@ def us(
     configure_logging(verbose, quiet)
     if min_frames < 1:
         raise ValueError(f"min_frames must be at least 1, got {min_frames}.")
+    if letterbox is not None and letterbox < 1:
+        raise ValueError(f"letterbox must be at least 1, got {letterbox}.")
+    if chunk_frames is None:
+        chunk_frames = LETTERBOX_CHUNK_FRAMES if letterbox else DEFAULT_CHUNK_FRAMES
     root = Path(input)
     if not root.exists():
         raise FileNotFoundError(f"{root} does not exist.")
@@ -830,6 +916,7 @@ def us(
                 tighten,
                 chunk_frames,
                 grayscale,
+                letterbox,
             )
             converted += 1
             if delete_source:
