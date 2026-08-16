@@ -69,12 +69,14 @@ from zarr.codecs import BloscCodec
 
 # Custom libraries
 from air_download.frames import DEFAULT_MIN_FRAMES, _is_skippable
-from air_download.utils import configure_logging
+from air_download.utils import (
+    CT_ARRAY_SUFFIX,
+    US_ARRAY_SUFFIX,
+    configure_logging,
+    converted_exam_path,
+)
 
 logger = logging.getLogger(__name__)
-
-CT_SUFFIX = ".nii.gz"
-US_SUFFIX = ".zarr"
 
 # Measured on real FAST clips. Chunking several frames together is what lets
 # zstd find the redundancy *between* frames, which a one-frame chunk cannot:
@@ -87,6 +89,7 @@ US_SUFFIX = ".zarr"
 DEFAULT_CHUNK_FRAMES = 8
 US_COMPRESSOR = BloscCodec(cname="zstd", clevel=9, shuffle="noshuffle")
 
+
 # Slice positions are floats off a scanner, so "same" needs a tolerance.
 ORIENTATION_TOLERANCE = 1e-3
 # A spacing that varies by more than this between slices is a gap, not noise.
@@ -95,6 +98,97 @@ SPACING_TOLERANCE = 0.01
 
 class ConversionError(Exception):
     """A series cannot be assembled into a volume."""
+
+
+def _target_for(
+    archive: Path, root: Path, destination: Path, suffix: str
+) -> Path:
+    """Where one archive's converted array goes.
+
+    A cohort tree goes through :func:`converted_exam_path`, so this module
+    and ``air_cohort`` resolve the same archive to the same path by calling
+    the same code -- which is what makes ``--converted_dir`` a reliable
+    resume signal rather than two rules that happen to agree today.
+
+    A single archive passed directly is not in a cohort tree and has no
+    modality folder to read, so the caller's suffix decides.
+    """
+    if root.is_dir():
+        return converted_exam_path(archive, root, destination)
+    return destination.with_name(destination.name + suffix)
+
+
+def verify_ct_output(destination: Path, expected_shape: tuple[int, ...]) -> None:
+    """Re-open a written volume and check it holds what was meant to go in.
+
+    Nothing downstream re-reads these files before the source archive is
+    deleted, so this is the only thing standing between a truncated write and
+    an exam that would have to be pulled from the PACS again. It re-opens
+    rather than trusting the writer's return: a short write, a full disk, and
+    a half-flushed gzip stream all leave a file on disk that ``exists()``.
+
+    Parameters
+    ----------
+    destination : Path
+        The written ``.nii.gz``.
+    expected_shape : tuple of int
+        Shape the volume was built with.
+
+    Raises
+    ------
+    ConversionError
+        If the file cannot be re-opened or disagrees with ``expected_shape``.
+    """
+    try:
+        reloaded = nib.load(destination)
+        shape = tuple(int(v) for v in reloaded.shape)
+    except Exception as exc:  # noqa: BLE001 - any failure to re-read is fatal
+        raise ConversionError(
+            f"The volume just written could not be re-opened "
+            f"({exc.__class__.__name__}); treating the conversion as failed."
+        ) from exc
+    if shape != tuple(expected_shape):
+        raise ConversionError(
+            f"The volume just written has shape {shape}, but "
+            f"{tuple(expected_shape)} was assembled; the file is truncated or "
+            f"was written over."
+        )
+
+
+def verify_us_output(destination: Path, expected_clips: int) -> None:
+    """Re-open a written Zarr group and check every clip reads back.
+
+    Parameters
+    ----------
+    destination : Path
+        The written ``.zarr`` group.
+    expected_clips : int
+        Number of clips the conversion reported writing.
+
+    Raises
+    ------
+    ConversionError
+        If the group cannot be re-opened, holds a different number of clips,
+        or holds one whose first chunk will not decompress.
+    """
+    try:
+        group = zarr.open_group(destination, mode="r")
+        names = sorted(group.array_keys())
+        for name in names:
+            array = group[name]
+            # Touch one chunk: the metadata can be intact while the chunk it
+            # points at was never flushed.
+            array[0]
+    except Exception as exc:  # noqa: BLE001 - any failure to re-read is fatal
+        raise ConversionError(
+            f"The clips just written could not be re-opened "
+            f"({exc.__class__.__name__}); treating the conversion as failed."
+        ) from exc
+    if len(names) != expected_clips:
+        raise ConversionError(
+            f"The group just written holds {len(names)} clip(s), but "
+            f"{expected_clips} were written; the group is incomplete."
+        )
 
 
 def read_series(archive: Path, modality: str = "CT") -> list[Any]:
@@ -318,17 +412,20 @@ def convert_ct_archive(archive: Path, destination: Path) -> Path:
     check_series(datasets)
 
     spacing = slice_spacing(slice_positions(datasets))
-    image = nib.Nifti1Image(to_hounsfield(datasets), build_affine(datasets[0], spacing))
+    volume = to_hounsfield(datasets)
+    image = nib.Nifti1Image(volume, build_affine(datasets[0], spacing))
     image.header.set_xyzt_units("mm")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     nib.save(image, destination)
+    verify_ct_output(destination, volume.shape)
     return destination
 
 
 def ct(
     input: str | Path,
     output_dir: str | Path,
+    delete_source: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
     quiet: bool = False,
@@ -346,6 +443,12 @@ def ct(
         Root of a downloaded cohort.
     output_dir : str or Path
         Root of the new tree. Must not be inside ``input``.
+    delete_source : bool, optional
+        Delete each archive once its volume has been written *and* verified.
+        This is what lets a long ingest run in batches without the source
+        archives ever accumulating -- they are five times the size of what
+        they convert into. Off by default: it is not reversible without
+        another download.
     dry_run : bool, optional
         Report what would be written and write nothing.
     verbose : bool, optional
@@ -378,16 +481,21 @@ def ct(
         logger.warning("No CT archives found under %s; nothing to convert.", root)
         return
 
-    written = failed = 0
+    written = failed = deleted = 0
     for archive in tqdm(archives, desc="Converting CT", disable=dry_run):
-        target = (destination / archive.relative_to(root)).with_suffix("")
-        target = target.with_name(target.name + CT_SUFFIX)
+        target = _target_for(archive, root, destination, CT_ARRAY_SUFFIX)
         if dry_run:
             print(target)
             continue
         try:
             convert_ct_archive(archive, target)
             written += 1
+            if delete_source:
+                # Only ever reached once verify_ct_output has re-opened the
+                # volume, so the archive is redundant rather than the last
+                # copy of anything.
+                archive.unlink()
+                deleted += 1
         except (ConversionError, zipfile.BadZipFile, OSError) as exc:
             failed += 1
             logger.error(
@@ -403,6 +511,13 @@ def ct(
     logger.info(
         "Wrote %d NIfTI volume(s) to %s, %d failed.", written, destination, failed
     )
+    if delete_source:
+        logger.info(
+            "Deleted %d source archive(s) whose volume was written and "
+            "verified; %d left in place.",
+            deleted,
+            len(archives) - deleted,
+        )
 
 
 def region_box(dataset: Any) -> tuple[int, int, int, int]:
@@ -619,6 +734,7 @@ def convert_us_archive(
             f"No ultrasound clip of at least {min_frames} frames in this "
             f"archive."
         )
+    verify_us_output(destination, written)
     return written
 
 
@@ -629,6 +745,7 @@ def us(
     tighten: bool = True,
     chunk_frames: int = DEFAULT_CHUNK_FRAMES,
     grayscale: bool | None = None,
+    delete_source: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
     quiet: bool = False,
@@ -662,6 +779,9 @@ def us(
     grayscale : bool, optional
         None decides per clip; True forces one channel for a cohort known to
         be B-mode only; False keeps every channel.
+    delete_source : bool, optional
+        Delete each archive once its clips have been written *and* verified.
+        Off by default: it is not reversible without another download.
     dry_run : bool, optional
         Report what would be written and write nothing.
     verbose : bool, optional
@@ -696,17 +816,27 @@ def us(
         logger.warning("No ultrasound archives found under %s.", root)
         return
 
-    clips = converted = failed = 0
+    clips = converted = failed = deleted = 0
     for archive in tqdm(archives, desc="Converting US", disable=dry_run):
-        target = (destination / archive.relative_to(root)).with_suffix(US_SUFFIX)
+        target = _target_for(archive, root, destination, US_ARRAY_SUFFIX)
         if dry_run:
             print(target)
             continue
         try:
             clips += convert_us_archive(
-                archive, target, min_frames, tighten, chunk_frames, grayscale
+                archive,
+                target,
+                min_frames,
+                tighten,
+                chunk_frames,
+                grayscale,
             )
             converted += 1
+            if delete_source:
+                # Only ever reached once verify_us_output has re-opened every
+                # clip, so the archive is redundant rather than the last copy.
+                archive.unlink()
+                deleted += 1
         except (ConversionError, zipfile.BadZipFile, OSError) as exc:
             failed += 1
             logger.error(
@@ -727,6 +857,13 @@ def us(
         destination,
         failed,
     )
+    if delete_source:
+        logger.info(
+            "Deleted %d source archive(s) whose clips were written and "
+            "verified; %d left in place.",
+            deleted,
+            len(archives) - deleted,
+        )
 
 
 def cli() -> None:

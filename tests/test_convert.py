@@ -29,6 +29,8 @@ from air_download.us_ct.convert import (
     slice_positions,
     to_hounsfield,
     us,
+    verify_ct_output,
+    verify_us_output,
 )
 
 SERIES_UID = generate_uid()
@@ -630,3 +632,97 @@ class TestForcedGrayscale:
         )
         clip = zarr.open_group(tmp_path / "A0001.zarr", mode="r")["clip-0000"]
         assert clip.ndim == 4
+
+
+class TestVerifiesItsOwnOutput:
+    """Nothing re-reads these files before the archive is deleted."""
+
+    def test_a_truncated_volume_is_caught(self, tmp_path):
+        archive = stack(tmp_path)
+        convert_ct_archive(archive, tmp_path / "A0002.nii.gz")
+        (tmp_path / "A0002.nii.gz").write_bytes(b"not a nifti")
+        with pytest.raises(ConversionError, match="could not be re-opened"):
+            verify_ct_output(tmp_path / "A0002.nii.gz", (6, 4, 3))
+
+    def test_a_volume_of_the_wrong_shape_is_caught(self, tmp_path):
+        archive = stack(tmp_path)
+        convert_ct_archive(archive, tmp_path / "A0002.nii.gz")
+        with pytest.raises(ConversionError, match="the file is truncated"):
+            verify_ct_output(tmp_path / "A0002.nii.gz", (9, 9, 9))
+
+    def test_a_good_volume_passes(self, tmp_path):
+        archive = stack(tmp_path)
+        convert_ct_archive(archive, tmp_path / "A0002.nii.gz")
+        verify_ct_output(tmp_path / "A0002.nii.gz", (6, 4, 3))
+
+    def test_a_missing_group_is_caught(self, tmp_path):
+        with pytest.raises(ConversionError, match="could not be re-opened"):
+            verify_us_output(tmp_path / "gone.zarr", 1)
+
+    def test_a_group_missing_a_clip_is_caught(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        with pytest.raises(ConversionError, match="holds 1 clip"):
+            verify_us_output(tmp_path / "A0001.zarr", 2)
+
+
+class TestDeleteSource:
+    """Batched ingest needs the archives gone, but only once they are safe."""
+
+    def _cohort(self, tmp_path):
+        root = tmp_path / "cohort" / "P0001" / "visit-01"
+        make_ct_archive(
+            root / "ct" / "A0002.zip",
+            [{"value": 1000, "z": 0.0}, {"value": 2000, "z": 2.0}],
+        )
+        make_us_archive(root / "us" / "A0001.zip", [{}])
+        return tmp_path / "cohort"
+
+    def test_ct_archives_are_kept_by_default(self, tmp_path):
+        root = self._cohort(tmp_path)
+        ct(root, tmp_path / "arrays")
+        assert (root / "P0001/visit-01/ct/A0002.zip").exists()
+
+    def test_ct_archives_are_removed_once_the_volume_verifies(self, tmp_path):
+        root = self._cohort(tmp_path)
+        ct(root, tmp_path / "arrays", delete_source=True)
+        assert not (root / "P0001/visit-01/ct/A0002.zip").exists()
+        assert (tmp_path / "arrays/P0001/visit-01/ct/A0002.nii.gz").exists()
+
+    def test_us_archives_are_removed_once_the_clips_verify(self, tmp_path):
+        root = self._cohort(tmp_path)
+        us(root, tmp_path / "arrays", min_frames=20, delete_source=True)
+        assert not (root / "P0001/visit-01/us/A0001.zip").exists()
+        assert (tmp_path / "arrays/P0001/visit-01/us/A0001.zarr").exists()
+
+    def test_a_failed_conversion_keeps_its_archive(self, tmp_path):
+        # The archive is the only remaining copy, so a failure must not
+        # delete it -- otherwise the exam has to be pulled again.
+        root = tmp_path / "cohort" / "P0001" / "visit-01" / "ct"
+        make_ct_archive(root / "A0002.zip", [{"value": 1, "z": 0.0, "shape": (4, 6)},
+                                             {"value": 2, "z": 2.0, "shape": (8, 8)}])
+        ct(tmp_path / "cohort", tmp_path / "arrays", delete_source=True)
+        assert (root / "A0002.zip").exists()
+
+    def test_a_dry_run_deletes_nothing(self, tmp_path):
+        root = self._cohort(tmp_path)
+        ct(root, tmp_path / "arrays", delete_source=True, dry_run=True)
+        assert (root / "P0001/visit-01/ct/A0002.zip").exists()
+
+
+class TestASingleArchive:
+    """One archive passed directly is not in a cohort tree.
+
+    It has no modality folder to read a suffix from, so it takes the one the
+    command implies rather than going through the cohort path mapping.
+    """
+
+    def test_a_lone_ct_archive_names_its_volume_from_the_output(self, tmp_path):
+        archive = stack(tmp_path)
+        ct(archive, tmp_path / "one")
+        assert (tmp_path / "one.nii.gz").exists()
+
+    def test_a_lone_us_archive_names_its_group_from_the_output(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{}])
+        us(archive, tmp_path / "one", min_frames=20)
+        assert (tmp_path / "one.zarr").exists()
