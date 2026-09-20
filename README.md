@@ -111,6 +111,7 @@ Every workflow is available as a pixi task from a clone of the repository, or as
 | `pixi run download-cohort` | `air_cohort` | Download a matched cohort into per-patient visit folders |
 | `pixi run frames` | `air_frames` | Count frames in downloaded DICOMs, and prune to the multi-frame clips |
 | `pixi run convert` | `air_convert` | Convert a cohort into NIfTI volumes and Zarr clips |
+| `pixi run labels` | `air_labels` | Write a cohort's CT findings keyed by pseudonym |
 | `pixi run test` | `pytest` | Run the test suite |
 
 ### Core workflows
@@ -373,6 +374,37 @@ It covers `air_match`, `air_cohort`, the pseudonym crosswalk, and
 [the commands to run the whole thing](docs/us-ct-cohort.md#running-the-pipeline)
 — developing against a handful of pairs, scaling to a full cohort without
 filling the disk, and optionally syncing the result to a GPU host.
+
+### Labelling that cohort from its CT reports
+
+The sibling `rate` project answers a fixed set of yes/no questions against each
+CT report and writes `questions.csv`, keyed by `report_id`. **That identifier is
+the CT's real accession number**, so the file cannot be joined to a converted
+cohort anywhere but here: the crosswalk is the only thing that maps an accession
+to a `P0001`/`A0001`, and it never leaves this project.
+
+`air_labels` does the join and throws the key away:
+
+```bash
+pixi run labels --answers ../ifast/data/metadata/fast_ct_cohort/questions.csv \
+                --crosswalk tmp/cohort_crosswalk.csv \
+                --arrays tmp/cohort-arrays \
+                --output ../ifast/data/metadata/labels
+```
+
+It writes one row per ultrasound-CT pair, keyed by both pseudonyms, with one
+column per question holding `1` for Yes, `0` for No and `-1` where the extractor
+returned no verdict. The pairing comes off the crosswalk alone, because a
+visit's two rows already share `anon_mrn` and `visit_folder`.
+
+What does not survive: the accession it joined on, and both timestamps. The
+interval between the two exams does, because it is the only part of a time of
+care a model has any use for. A test asserts none of the rest reaches the file.
+
+Every question `rate` asked gets a column, not the subset a FAST window could
+show. Which findings are worth predicting is a modelling decision argued in
+`ifast`, and changing it must not need the crosswalk, this command, or a rerun
+of the extraction.
 
 ### Counting frames, and keeping only the real cine clips
 
