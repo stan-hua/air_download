@@ -5792,6 +5792,7 @@ packages:
   - fire>=0.5
   - pylibjpeg[libjpeg]>=2.1.0,<3
   - ultraml>=0.2.0
+  - pyyaml>=6
   - opencv-python-headless>=4.9
   - pytest>=7.0 ; extra == 'dev'
   requires_python: '>=3.10'

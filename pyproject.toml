@@ -19,6 +19,8 @@ dependencies = [
     "fire>=0.5",
     "pylibjpeg[libjpeg]>=2.1.0,<3",
     "ultraml>=0.2.0",
+    # `air_labels` reads the question set out of `rate`'s modality config.
+    "pyyaml>=6",
     # Letterboxing rescales every ultrasound frame, so cv2 is a direct
     # import now, not just ultraml's business. Named here rather than as a
     # conda dependency because ultraml pulls the PyPI wheel regardless, and
@@ -35,6 +37,7 @@ air_match = "air_download.us_ct.match:cli"
 air_cohort = "air_download.us_ct.cohort:cli"
 air_frames = "air_download.frames:cli"
 air_convert = "air_download.us_ct.convert:cli"
+air_labels = "air_download.us_ct.labels:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -73,6 +76,7 @@ pydicom = ">=3.0.2,<4"
 nibabel = ">=5.4.2,<6"
 zarr = ">=3.3.0,<4"
 numcodecs = ">=0.16.5,<0.17"
+pyyaml = ">=6"
 
 # Installs the package itself (and its `air_download` console script) in
 # editable mode, so source edits take effect without a reinstall.
@@ -96,4 +100,5 @@ match = { cmd = "air_match", description = "Match ED ultrasound exams to the CTs
 download-cohort = { cmd = "air_cohort", description = "Download a matched US-CT cohort into per-patient visit folders" }
 frames = { cmd = "air_frames", description = "Count frames in downloaded DICOMs, and prune to the multi-frame clips" }
 convert = { cmd = "air_convert", description = "Convert a downloaded cohort into NIfTI volumes and Zarr clips" }
+labels = { cmd = "air_labels", description = "Write a cohort's CT findings keyed by pseudonym, joining the crosswalk" }
 test = { cmd = "pytest", description = "Run the test suite" }
