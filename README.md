@@ -283,8 +283,9 @@ INFO: Series selection: from 6 to 1 (thinnest axial).
 Search first and write the results to a CSV, one directory per cohort:
 
 ```bash
-pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2021-01-01 -de 2023-12-31 -o output-ct_abdomen_pelvis/
-pixi run search -m US -d "US ED BEDSIDE" -ds 2021-01-01 -de 2023-12-31 -o output-us_ed_bedside/
+pixi run search -m CT -d "CT ABDOMEN PELVIS W CONTRAST" -ds 2019-08-03 -de 2026-12-31 -o output-ct_abdomen_pelvis/
+pixi run search -m US -d "US ED BEDSIDE" -ds 2019-08-03 -de 2026-12-31 -o output-us_ed_bedside/
+pixi run search -m CT -d "CT CHEST W CONTRAST" -ds 2019-08-03 -de 2026-12-31 -o output-ct_chest/
 ```
 
 Each writes `<output>/accessions.csv`. Three years is well past the 7-day query cap, so each of these runs as ~157 chunked queries merged into one de-duplicated result set. Review the CSV before committing to a download:
