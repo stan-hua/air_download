@@ -8,6 +8,7 @@ nor the timestamps it read.
 
 # Standard libraries
 import csv
+import inspect
 import json
 from pathlib import Path
 
@@ -279,3 +280,44 @@ class TestMain:
             dry_run=True,
         )
         assert not output.exists()
+
+
+class TestTheQuestionSetItReads:
+    """Which config the labeller defaults to, and how it is versioned."""
+
+    def test_the_default_is_the_generated_fast_set(self):
+        """Not `abdomen_ct.yaml`.
+
+        The source config asks 226 questions about anatomy no FAST window
+        covers. Defaulting to it writes 225 `q_<md5>` columns where the project
+        wants the generated set's findings, and nothing downstream would say
+        so -- the table would simply be wrong by 112 columns.
+        """
+        default = inspect.signature(main).parameters["modality_config"].default
+        assert default.endswith("fast_abdomen_ct.yaml")
+
+    def test_the_version_comes_from_the_lock_when_there_is_one(self, tmp_path):
+        """`question_set` moves when a question moves and not otherwise.
+
+        A digest of the file's bytes moves when a definition is edited or a
+        comment reflowed, neither of which changes what a stored answer means,
+        so a table stamped that way looks stale when it is not.
+        """
+        config = tmp_path / "fast_abdomen_ct.yaml"
+        config.write_text("modality: x\ncategories: {}\n")
+        lock = tmp_path / "fast_abdomen_ct.lock.json"
+        lock.write_text(json.dumps({"digest": {"question_set": "abcdef0123456789"}}))
+        assert config_digest(config) == "fast_abdomen_ct@abcdef0123456789"
+
+        # editing the file without moving a question leaves the version alone
+        config.write_text("modality: x\ncategories: {}\n# a comment\n")
+        assert config_digest(config) == "fast_abdomen_ct@abcdef0123456789"
+
+    def test_a_config_with_no_lock_falls_back_to_its_bytes(self, tmp_path):
+        """Every modality config except the generated one."""
+        config = tmp_path / "abdomen_ct.yaml"
+        config.write_text("modality: x\ncategories: {}\n")
+        first = config_digest(config)
+        assert first.startswith("abdomen_ct@")
+        config.write_text("modality: x\ncategories: {}\n# changed\n")
+        assert config_digest(config) != first

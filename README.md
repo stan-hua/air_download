@@ -387,10 +387,10 @@ to a `P0001`/`A0001`, and it never leaves this project.
 `air_labels` does the join and throws the key away:
 
 ```bash
-pixi run labels --answers ../ifast/data/metadata/fast_ct_cohort/questions.csv \
+pixi run labels --answers ../ifast/data/fast_ct_cohort/metadata/ct_text_reports/questions.csv \
                 --crosswalk tmp/cohort_crosswalk.csv \
                 --arrays tmp/cohort-arrays \
-                --output ../ifast/data/metadata/labels
+                --output ../ifast/data/fast_ct_25/metadata/labels
 ```
 
 It writes one row per ultrasound-CT pair, keyed by both pseudonyms, with one

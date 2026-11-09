@@ -26,9 +26,9 @@ Examples
 --------
 Write the labels for a downloaded cohort::
 
-    pixi run labels --answers ../ifast/data/metadata/fast_ct_cohort/questions.csv \
+    pixi run labels --answers ../ifast/data/fast_ct_cohort/metadata/ct_text_reports/questions.csv \
                     --crosswalk tmp/cohort-test25_crosswalk.csv \
-                    --output ../ifast/data/metadata/labels
+                    --output ../ifast/data/fast_ct_25/metadata/labels
 
 Check the join without writing anything::
 
@@ -155,9 +155,36 @@ def read_questions(modality_config: str | Path) -> dict[str, dict[str, str]]:
 
 
 def config_digest(modality_config: str | Path) -> str:
-    """Return the question set's version, as a short digest of its config."""
-    digest = hashlib.sha256(Path(modality_config).read_bytes()).hexdigest()[:8]
-    return f"{Path(modality_config).stem}@{digest}"
+    """Return the question set's version, for `label_set_version`.
+
+    A lock file beside the config records a `question_set` digest over the
+    wordings alone, and that is the right version to stamp a label table with:
+    it moves when a question moves and stays put when a definition, a tier or a
+    category is edited, none of which changes what a stored answer means. A
+    digest of the file's bytes moves on all of those, so a table would look
+    stale after a comment was reflowed.
+
+    Falls back to the file digest when no lock sits beside the config, which is
+    true of every modality config except the generated FAST set.
+
+    Parameters
+    ----------
+    modality_config : str or Path
+        A YAML file under `rate/config/modalities/`.
+
+    Returns
+    -------
+    str
+        `<config stem>@<digest>`.
+    """
+    path = Path(modality_config)
+    lock = path.with_suffix(".lock.json")
+    if lock.exists():
+        recorded = json.loads(lock.read_text()).get("digest", {}).get("question_set")
+        if recorded:
+            return f"{path.stem}@{recorded}"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+    return f"{path.stem}@{digest}"
 
 
 def read_pairs(crosswalk: str | Path) -> list[dict[str, str]]:
@@ -412,8 +439,8 @@ def write_labels(rows, questions, output, version):
 def main(
     answers: str,
     crosswalk: str,
-    modality_config: str = "../rate/config/modalities/abdomen_ct.yaml",
-    output: str = "../ifast/data/metadata/labels",
+    modality_config: str = "../rate/config/modalities/fast_abdomen_ct.yaml",
+    output: str = "../ifast/data/fast_ct_25/metadata/labels",
     arrays: str | None = None,
     dry_run: bool = False,
 ) -> None:
