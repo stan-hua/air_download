@@ -30,6 +30,12 @@ Write the labels for a downloaded cohort::
                     --crosswalk tmp/cohort-test25_crosswalk.csv \
                     --output ../ifast/data/fast_ct_25/metadata/labels
 
+Add each pair's split and training order, from the file `air_split` wrote::
+
+    pixi run labels --answers questions.csv --crosswalk out_crosswalk.csv \
+                    --splits matched_us_ct-2019_2026-split.csv \
+                    --output ../ifast/data/fast_ct_train/metadata/labels
+
 Check the join without writing anything::
 
     pixi run labels --answers questions.csv --crosswalk out_crosswalk.csv --dry_run
@@ -79,6 +85,8 @@ KEY_COLUMNS = (
     "us_ct_delta_minutes",
     "downloaded",
     "label_set_version",
+    "split",
+    "train_order",
 )
 
 
@@ -239,6 +247,8 @@ def read_pairs(crosswalk: str | Path) -> list[dict[str, str]]:
             {
                 "anon_mrn": anon_mrn,
                 "visit": visit,
+                "mrn": as_identifier(us.get("mrn")),
+                "us_accession_number": as_identifier(us.get("accession_number")),
                 "anon_accession_number": us["anon_accession_number"],
                 "anon_ct_accession_number": ct["anon_accession_number"],
                 "ct_accession_number": as_identifier(ct.get("accession_number")),
@@ -330,7 +340,40 @@ def read_answers(
     return found
 
 
-def build_rows(pairs, answers, questions, version, arrays=None):
+def read_splits(path: str | Path) -> dict[tuple[str, str, str], tuple[str, str]]:
+    """Read the split and training order `air_split` gave each pair.
+
+    Parameters
+    ----------
+    path : str or Path
+        The split match list. It has real identifiers, so nothing here logs a
+        row of it.
+
+    Returns
+    -------
+    dict
+        ``(mrn, us_accession_number, ct_accession_number)`` to
+        ``(split, train_order)``.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist.")
+    columns = ("mrn", "us_accession_number", "ct_accession_number", "split", "train_order")
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = [c for c in columns if c not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path} is missing required column(s): {', '.join(missing)}")
+        return {
+            tuple(as_identifier(row[c]) for c in columns[:3]): (
+                (row["split"] or "").strip(),
+                (row["train_order"] or "").strip(),
+            )
+            for row in reader
+        }
+
+
+def build_rows(pairs, answers, questions, version, arrays=None, splits=None):
     """Assemble one row per exam pair.
 
     Parameters
@@ -347,6 +390,9 @@ def build_rows(pairs, answers, questions, version, arrays=None):
         The converted cohort, used to fill `downloaded`. Absent means every
         pair is marked downloaded, which is what a crosswalk of a completed
         download already implies.
+    splits : dict, optional
+        What `read_splits` returned. Absent leaves `split` and `train_order`
+        empty.
 
     Returns
     -------
@@ -379,7 +425,17 @@ def build_rows(pairs, answers, questions, version, arrays=None):
         }
         for column, question in zip(columns, questions, strict=True):
             row[column] = found.get(question, UNANSWERED)
+        split, order = ("", "")
+        if splits is not None:
+            key = (pair["mrn"], pair["us_accession_number"], pair["ct_accession_number"])
+            split, order = splits.get(key, ("", ""))
+        row["split"], row["train_order"] = split, order
         rows.append(row)
+
+    if splits is not None:
+        unsplit = sum(1 for row in rows if not row["split"])
+        if unsplit:
+            logger.warning("%d pair(s) are not in the split file and have no split.", unsplit)
 
     if unreported:
         logger.warning(
@@ -442,6 +498,7 @@ def main(
     modality_config: str = "../rate/config/modalities/fast_abdomen_ct.yaml",
     output: str = "../ifast/data/fast_ct_25/metadata/labels",
     arrays: str | None = None,
+    splits: str | None = None,
     dry_run: bool = False,
 ) -> None:
     """Join a cohort's CT report answers to its pseudonyms, and write them out.
@@ -458,6 +515,9 @@ def main(
         Directory for `exam_findings.csv` and its sidecar.
     arrays : str, optional
         The converted cohort, used to fill the `downloaded` column.
+    splits : str, optional
+        The split match list `air_split` wrote, used to fill `split` and
+        `train_order`.
     dry_run : bool, optional
         Report the join and write nothing.
 
@@ -476,7 +536,8 @@ def main(
     wanted = {pair["ct_accession_number"] for pair in pairs if pair["ct_accession_number"]}
     found = read_answers(answers, wanted, set(questions))
 
-    rows, unreported = build_rows(pairs, found, questions, version, arrays)
+    split_map = None if splits is None else read_splits(splits)
+    rows, unreported = build_rows(pairs, found, questions, version, arrays, split_map)
     positives = sum(
         1 for row in rows if any(row[key] == 1 for key in row if key.startswith(QUESTION_PREFIX))
     )

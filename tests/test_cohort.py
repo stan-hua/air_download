@@ -196,8 +196,10 @@ class TestReadMatchedPairs:
                 "us_accession_number": "U1",
                 "us_date_time": "2021-03-02",
                 "ct_accession_number": "C1",
-                # Optional, so a CSV predating the column still reads.
+                # Optional, so a CSV predating these columns still reads.
                 "ct_date_time": "",
+                "split": "",
+                "train_order": "",
             }
         ]
 

@@ -38,6 +38,7 @@ air_cohort = "air_download.us_ct.cohort:cli"
 air_frames = "air_download.frames:cli"
 air_convert = "air_download.us_ct.convert:cli"
 air_labels = "air_download.us_ct.labels:cli"
+air_split = "air_download.us_ct.split:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -101,4 +102,5 @@ download-cohort = { cmd = "air_cohort", description = "Download a matched US-CT 
 frames = { cmd = "air_frames", description = "Count frames in downloaded DICOMs, and prune to the multi-frame clips" }
 convert = { cmd = "air_convert", description = "Convert a downloaded cohort into NIfTI volumes and Zarr clips" }
 labels = { cmd = "air_labels", description = "Write a cohort's CT findings keyed by pseudonym, joining the crosswalk" }
+split-cohort = { cmd = "air_split", description = "Mark every matched pair test, validation or training, and order the training pairs" }
 test = { cmd = "pytest", description = "Run the test suite" }

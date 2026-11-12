@@ -35,6 +35,15 @@ filed twice::
     pixi run download-cohort --matched_csv matched_us_ct.csv \
         --output output-cohort/ --cred_path ~/air_login.txt
 
+Download a split drawn by `air_split`, the validation set first and then the
+first 100 training pairs. Its rows are already in download order, so patients
+are numbered in that order too::
+
+    pixi run download-cohort --matched_csv matched_us_ct-2019_2026-split.csv \
+        --output output-cohort/ --split val --cred_path ~/air_login.txt
+    pixi run download-cohort --matched_csv matched_us_ct-2019_2026-split.csv \
+        --output output-cohort/ --split train --n 100 --cred_path ~/air_login.txt
+
 Keep the crosswalk somewhere other than beside the cohort::
 
     pixi run download-cohort --matched_csv matched_us_ct.csv \
@@ -76,8 +85,9 @@ REQUIRED_COLUMNS = (
 )
 
 # Read when present, but not required: a matched CSV written before this
-# column existed must still work, as with `us_image_count`.
-OPTIONAL_COLUMNS = ("ct_date_time",)
+# column existed must still work, as with `us_image_count`. `split` and
+# `train_order` come from `air_split`, and `--split` filters on the first.
+OPTIONAL_COLUMNS = ("ct_date_time", "split", "train_order")
 
 _UNSAFE_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -311,6 +321,7 @@ def download_cohort(
     crosswalk_csv: str | Path | None = None,
     converted_dir: str | Path | None = None,
     n: int | None = None,
+    split: str | None = None,
     url: str | None = None,
     cred_path: str | Path | None = None,
     project: int | None = None,
@@ -356,6 +367,10 @@ def download_cohort(
         Download only the first ``n`` visits, ordered as they will be
         numbered. Use it to verify one visit before committing to the whole
         cohort.
+    split : str, optional
+        Download only the rows whose ``split`` column, from ``air_split``,
+        holds this value. Applied before ``n``, so ``--split train --n 316``
+        is the first 316 training pairs.
     url : str, optional
         AIR API URL. Falls back to the credential file or environment.
     cred_path : str or Path, optional
@@ -395,6 +410,15 @@ def download_cohort(
         )
 
     rows = read_matched_pairs(Path(matched_csv))
+    if split is not None:
+        if not any(row.get("split") for row in rows):
+            raise ValueError(
+                f"--split {split} was given, and {matched_csv} has no split "
+                "column. Run `air_split` first and pass the file it writes."
+            )
+        before = len(rows)
+        rows = [row for row in rows if row.get("split") == split]
+        logger.info("%d of %d pair(s) are in the %s split.", len(rows), before, split)
     # Sort before slicing, so `--n 1` picks the same visit the full run would
     # number first and the two runs assign identical identifiers.
     rows = sort_rows_for_numbering(rows)
