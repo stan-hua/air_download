@@ -131,8 +131,13 @@ def read_matched_rows(csv_path: str | Path) -> list[dict[str, str]]:
     return rows
 
 
-def included_findings(lock_path: str | Path, tiers=INCLUDED_TIERS) -> dict[str, list[str]]:
-    """Read which findings the question set includes, and the questions behind each.
+def included_findings(lock_path: str | Path, tiers=INCLUDED_TIERS) -> dict[str, int]:
+    """Read which findings the question set includes, and how many wordings each has.
+
+    This mapped a finding to the md5 of each of its wordings until 2026-11-14,
+    because `read_answers` keyed its answers that way. It keys them by finding
+    id now, so the hashes are no longer the way in and the count is what is
+    left worth knowing.
 
     Parameters
     ----------
@@ -144,18 +149,18 @@ def included_findings(lock_path: str | Path, tiers=INCLUDED_TIERS) -> dict[str, 
     Returns
     -------
     dict
-        Finding id to the ids of the questions that word it.
+        Finding id to its wording count.
     """
     lock = json.loads(Path(lock_path).read_text())
     findings = {}
     for finding, entry in lock["findings"].items():
         if entry.get("tier") in tiers:
-            findings[finding] = [variant["md5"] for variant in entry["variants"]]
+            findings[finding] = len(entry["variants"])
     return findings
 
 
 def finding_positives(
-    answers: dict[str, dict[str, int]], findings: dict[str, list[str]]
+    answers: dict[str, dict[str, dict[int, int]]], findings: dict[str, int]
 ) -> dict[str, set[str]]:
     """The findings each report is positive for.
 
@@ -165,7 +170,8 @@ def finding_positives(
     Parameters
     ----------
     answers : dict
-        Report id to question id to 1, 0 or -1, from `read_answers`.
+        Report id to finding id to variant index to 1, 0 or -1, from
+        `read_answers`.
     findings : dict
         From `included_findings`.
 
@@ -177,10 +183,10 @@ def finding_positives(
     return {
         report: {
             finding
-            for finding, questions in findings.items()
-            if any(by_question.get(question) == 1 for question in questions)
+            for finding in findings
+            if 1 in (by_finding.get(finding) or {}).values()
         }
-        for report, by_question in answers.items()
+        for report, by_finding in answers.items()
     }
 
 
@@ -490,12 +496,13 @@ def main(
         )
 
     findings = included_findings(lock)
-    questions = {question for variants in findings.values() for question in variants}
-    logger.info("%d included finding(s) over %d question(s).", len(findings), len(questions))
+    wordings = sum(findings.values())
+    logger.info("%d included finding(s) over %d wording(s).", len(findings), wordings)
 
     rows = read_matched_rows(matched)
     wanted = {row["ct_accession_number"] for row in rows}
-    positives = finding_positives(read_answers(answers, wanted, questions), findings)
+    found, _templates, _levels = read_answers(answers, wanted, set(findings))
+    positives = finding_positives(found, findings)
 
     split = assign_splits(rows, positives, val_exams=val_exams, seed=seed, test_year=test_year)
     log_counts(split_counts(split, positives, findings))

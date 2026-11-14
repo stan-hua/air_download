@@ -86,17 +86,20 @@ class TestIncludedFindings:
                 }
             )
         )
-        assert included_findings(lock) == {
-            "ascites": ["aaaa0001", "aaaa0002"],
-            "cyst": ["bbbb0001"],
-        }
+        assert included_findings(lock) == {"ascites": 2, "cyst": 1}
 
 
 class TestFindingPositives:
     def test_any_wording_answered_yes_is_positive(self):
-        findings = {"ascites": ["q1", "q2"], "cyst": ["q3"]}
-        answers = {"C1": {"q1": 0, "q2": 1, "q3": -1}, "C2": {"q1": -1, "q3": 0}}
+        findings = {"ascites": 2, "cyst": 1}
+        answers = {
+            "C1": {"ascites": {0: 0, 1: 1}, "cyst": {0: -1}},
+            "C2": {"ascites": {0: -1}, "cyst": {0: 0}},
+        }
         assert finding_positives(answers, findings) == {"C1": {"ascites"}, "C2": set()}
+
+    def test_a_finding_with_no_answer_at_all_is_not_positive(self):
+        assert finding_positives({"C1": {}}, {"ascites": 2}) == {"C1": set()}
 
 
 class TestStratifiedSample:
@@ -259,7 +262,9 @@ class TestLabelsCarryTheSplit:
                      row["ct_accession_number"], row["ct_date_time"])
                 )
 
-        rows, _ = build_rows(read_pairs(crosswalk), {}, {}, "v", splits=read_splits(split_path))
+        rows, _variants, _unreported = build_rows(
+            read_pairs(crosswalk), {}, {}, "v", splits=read_splits(split_path)
+        )
         assert {(r["anon_mrn"], r["split"], r["train_order"]) for r in rows} == {
             ("P0001", "train", "1"),
             ("P0002", "val", ""),
@@ -287,9 +292,14 @@ class TestMain:
         answers = tmp_path / "questions.csv"
         with answers.open("w", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["report_id", "category", "question_id", "question", "answer"])
+            writer.writerow(
+                ["report_id", "category", "finding_id", "variant_index", "verdict", "answer"]
+            )
             for i, row in enumerate(rows):
-                writer.writerow([row["ct_accession_number"], "Peritoneum", "q1", "x", "Yes" if i % 4 == 0 else "No"])
+                writer.writerow(
+                    [row["ct_accession_number"], "Peritoneum", "ascites", 0,
+                     "yes" if i % 4 == 0 else "no", ""]
+                )
 
         output = tmp_path / "m-split.csv"
         main(str(matched), str(answers), lock=str(lock), output=str(output), val_exams=20, seed=0)
