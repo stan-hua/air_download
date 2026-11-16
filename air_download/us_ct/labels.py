@@ -120,6 +120,15 @@ KEY_COLUMNS = (
     # eras they confound every label here, and the folds cannot stratify on a
     # column the table does not have.
     "template",
+    # Whether the CT report's indication describes a traumatic presentation,
+    # and which categories named it. This cohort pairs an ED FAST with a CT
+    # and a FAST is a trauma protocol, so the flag splits it into the two
+    # groups every claim about what a sweep misses is read against. Measured
+    # over the 12,681 reports: 6,186 yes, 6,459 no, 36 with no indication
+    # section, and a flagged report carries an acute traumatic finding 25.9%
+    # of the time against 7.6% for an unflagged one.
+    "trauma_indication",
+    "trauma_terms",
     "label_set_version",
     # A digest of the decode configuration the answers were produced under.
     # A17 asked for this and nothing carried it: the labels now depend on
@@ -394,8 +403,9 @@ def read_answers(
     -------
     tuple of (dict, dict, dict)
         Report identifier to finding id to variant index to 1, 0 or
-        `UNANSWERED`; report identifier to its dictation template; and
-        `(report, finding, index)` to its `(certainty, severity)`.
+        `UNANSWERED`; report identifier to its covariates, each column name
+        to its value; and `(report, finding, index)` to its
+        `(certainty, severity)`.
 
     Raises
     ------
@@ -409,7 +419,10 @@ def read_answers(
 
     csv.field_size_limit(10**9)
     found: dict[str, dict[str, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
-    templates: dict[str, str] = {}
+    # One entry per report, holding whatever covariates the row carries. A
+    # second covariate arrived with the trauma flag, and a dict per report
+    # takes a third without changing this function's shape again.
+    covariates: dict[str, dict[str, str]] = {}
     levels: dict[tuple, tuple] = {}
     unknown_finding, conflicts, repeats = 0, 0, 0
 
@@ -455,9 +468,10 @@ def read_answers(
                 (row.get("severity") or "").strip(),
             )
 
-            template = (row.get("template") or "").strip()
-            if template:
-                templates.setdefault(report, template)
+            for name in ("template", "trauma_indication", "trauma_terms"):
+                value = (row.get(name) or "").strip()
+                if value:
+                    covariates.setdefault(report, {}).setdefault(name, value)
 
     if unknown_finding:
         logger.warning(
@@ -470,18 +484,23 @@ def read_answers(
     if repeats:
         logger.info("%d cell(s) were answered twice and agreed.", repeats)
     logger.info("Read answers for %d of %d report(s) in the cohort.", len(found), len(wanted))
-    if templates:
-        tally = Counter(templates.values())
+    if covariates:
+        tally = Counter(e.get("template", "") for e in covariates.values())
         logger.info(
             "Dictation template: %s",
-            ", ".join(f"{name} {count}" for name, count in sorted(tally.items())),
+            ", ".join(f"{name or 'absent'} {count}" for name, count in sorted(tally.items())),
+        )
+        trauma = Counter(e.get("trauma_indication", "") for e in covariates.values())
+        logger.info(
+            "Trauma indication: %s",
+            ", ".join(f"{name or 'absent'} {count}" for name, count in sorted(trauma.items())),
         )
     else:
         logger.warning(
             "No answer row carries a `template`, so the folds cannot stratify on it. "
             "The extraction predates rate's template detection."
         )
-    return found, templates, levels
+    return found, covariates, levels
 
 
 def decode_digest(answers: str | Path) -> tuple[str, dict]:
@@ -561,7 +580,7 @@ def build_rows(
     version,
     arrays=None,
     splits=None,
-    templates=None,
+    covariates=None,
     decode_version="",
     levels=None,
 ):
@@ -596,9 +615,9 @@ def build_rows(
     splits : dict, optional
         What `read_splits` returned. Absent leaves `split` and `train_order`
         empty.
-    templates : dict, optional
-        What `read_answers` returned, second element. Absent leaves `template`
-        empty.
+    covariates : dict, optional
+        What `read_answers` returned, second element. Absent leaves
+        `template` and the two trauma columns empty.
     decode_version : str, optional
         What `decode_digest` returned.
     levels : dict, optional
@@ -611,7 +630,7 @@ def build_rows(
         The wide rows, the long-form rows, and how many pairs had no CT report
         at all.
     """
-    templates = templates or {}
+    covariates = covariates or {}
     levels = levels or {}
     rows, variants, unreported = [], [], 0
 
@@ -635,7 +654,10 @@ def build_rows(
             "visit": pair["visit"],
             "us_ct_delta_minutes": delta_minutes(pair["us_date_time"], pair["ct_date_time"]),
             "downloaded": downloaded,
-            "template": templates.get(accession, ""),
+            **{
+                name: (covariates.get(accession) or {}).get(name, "")
+                for name in ("template", "trauma_indication", "trauma_terms")
+            },
             "label_set_version": version,
             "decode_version": decode_version,
         }
@@ -823,7 +845,7 @@ def main(
 
     pairs = read_pairs(crosswalk)
     wanted = {pair["ct_accession_number"] for pair in pairs if pair["ct_accession_number"]}
-    found, templates, levels = read_answers(answers, wanted, set(questions))
+    found, covariates, levels = read_answers(answers, wanted, set(questions))
     decode_version, decode = decode_digest(answers)
     if decode_version:
         logger.info("Decode configuration %s.", decode_version)
@@ -836,7 +858,7 @@ def main(
         version,
         arrays,
         split_map,
-        templates=templates,
+        covariates=covariates,
         decode_version=decode_version,
         levels=levels,
     )

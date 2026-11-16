@@ -95,6 +95,7 @@ def crosswalk(tmp_path):
 ANSWER_COLUMNS = [
     "report_id", "category", "finding_id", "variant_index",
     "question_id", "question", "answer", "template",
+    "trauma_indication", "trauma_terms",
     "verdict", "evidence", "certainty_phrase", "certainty",
     "severity_phrase", "severity", "attribution", "named_outright",
 ]
@@ -105,7 +106,7 @@ def _wording_md5(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
 
 
-def _answer_row(report, finding, index, verdict, template="A", answer=""):
+def _answer_row(report, finding, index, verdict, template="A", answer="", trauma="yes"):
     """One row of `questions.csv`, with the columns rate writes."""
     entry = FINDINGS[finding]
     wordings = [entry["question"], *entry["variants"]]
@@ -119,6 +120,8 @@ def _answer_row(report, finding, index, verdict, template="A", answer=""):
         "question": text,
         "answer": answer or f'{{"answer": "{verdict}"}}',
         "template": template,
+        "trauma_indication": trauma,
+        "trauma_terms": "vehicle" if trauma == "yes" else "",
         "verdict": verdict,
         "evidence": "a sentence the report never really said",
         "certainty_phrase": "",
@@ -146,8 +149,8 @@ def answers(tmp_path):
         _answer_row("CT-1", "hepatic_cysts_simple", 0, "no"),
         _answer_row("CT-1", "hepatic_cysts_simple", 1, "no"),
         _answer_row("CT-1", "hepatic_cysts_simple", 2, "no"),
-        _answer_row("CT-2", "ascites", 0, "yes", template="B"),
-        _answer_row("CT-2", "ascites", 1, "no", template="B"),
+        _answer_row("CT-2", "ascites", 0, "yes", template="B", trauma="no"),
+        _answer_row("CT-2", "ascites", 1, "no", template="B", trauma="no"),
         _answer_row("CT-2", "hepatic_cysts_simple", 0, "no", template="B"),
         _answer_row("CT-2", "hepatic_cysts_simple", 1, "not_assessed", template="B"),
         _answer_row("CT-2", "hepatic_cysts_simple", 2, "no", template="B"),
@@ -248,9 +251,21 @@ class TestReadAnswers:
         found, _templates, _levels = read_answers(answers, {"CT-1"}, {"ascites"})
         assert set(found["CT-1"]) == {"ascites"}
 
-    def test_it_reads_the_template(self, answers):
-        _found, templates, _levels = read_answers(answers, *self.keys())
-        assert templates == {"CT-1": "A", "CT-2": "B"}
+    def test_it_reads_the_covariates(self, answers):
+        """One entry per report, holding whatever covariate columns it has.
+
+        A second covariate arrived with the trauma flag, so the entry is a
+        dict rather than one string. `CT-2`'s first two rows say `no` and its
+        later rows say `yes`, and the first value read wins, which is what
+        `setdefault` is for: a covariate describes the report, so the rows
+        cannot disagree about it without the extraction being wrong.
+        """
+        _found, covariates, _levels = read_answers(answers, *self.keys())
+        assert covariates["CT-1"]["template"] == "A"
+        assert covariates["CT-1"]["trauma_indication"] == "yes"
+        assert covariates["CT-1"]["trauma_terms"] == "vehicle"
+        assert covariates["CT-2"]["template"] == "B"
+        assert covariates["CT-2"]["trauma_indication"] == "no"
 
     def test_a_file_without_finding_ids_raises(self, tmp_path):
         """An extraction predating the re-key. Its columns are named for a
@@ -304,10 +319,10 @@ class TestBuildRows:
 
     def built(self, crosswalk, answers, modality_config, **kwargs):
         questions = read_questions(modality_config)
-        found, templates, levels = read_answers(answers, {"CT-1", "CT-2"}, set(questions))
+        found, covariates, levels = read_answers(answers, {"CT-1", "CT-2"}, set(questions))
         rows, variants, unreported = build_rows(
             read_pairs(crosswalk), found, questions, "v1",
-            templates=templates, levels=levels, **kwargs
+            covariates=covariates, levels=levels, **kwargs
         )
         return questions, rows, variants, unreported
 
@@ -412,11 +427,11 @@ class TestWriteLabels:
     @pytest.fixture
     def written(self, tmp_path, crosswalk, answers, modality_config):
         questions = read_questions(modality_config)
-        found, templates, levels = read_answers(answers, {"CT-1", "CT-2"}, set(questions))
+        found, covariates, levels = read_answers(answers, {"CT-1", "CT-2"}, set(questions))
         version = config_digest(modality_config)
         rows, variants, _ = build_rows(
             read_pairs(crosswalk), found, questions, version,
-            templates=templates, levels=levels,
+            covariates=covariates, levels=levels,
         )
         return write_labels(
             rows, questions, tmp_path / "labels", version, variants=variants
