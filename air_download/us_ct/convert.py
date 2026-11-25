@@ -97,6 +97,22 @@ US_COMPRESSOR = BloscCodec(cname="zstd", clevel=9, shuffle="noshuffle")
 # reading one random frame starts to cost a 64-frame decompress.
 LETTERBOX_CHUNK_FRAMES = 32
 
+# `letterbox_frames` fits every clip into this square. A measurement over 197
+# real clips and 29,834 frames set the size. The native beamform crops store
+# 2.970 GB, and the same clips at 512 store 1.329 GB. That is 2.24x smaller, at
+# 44.5 kB a frame. The resize also makes a clip faster to read, 3,913 frames a
+# second against 2,095 on one thread with a cold cache, because less compressed
+# data reaches zstd. The saving beats the pixel-count ratio of 1.6x because
+# INTER_AREA averages away the speckle, and speckle is the least compressible
+# content in a frame.
+#
+# 512 is the largest input the candidate encoders use. DINOv3 embeds position
+# with RoPE, so it accepts any size. It measures best at 512 on chest
+# radiographs, with no gain above that. NVIDIA's TAO ports list 256, 512 and
+# 768. A 512 store therefore leaves every smaller resolution available, and
+# `ifast` downsamples to whatever a training stage asks for.
+DEFAULT_LETTERBOX = 512
+
 # Slice positions are floats off a scanner, so "same" needs a tolerance.
 ORIENTATION_TOLERANCE = 1e-3
 # A spacing that varies by more than this between slices is a gap, not noise.
@@ -819,7 +835,7 @@ def us(
     tighten: bool = True,
     chunk_frames: int | None = None,
     grayscale: bool | None = None,
-    letterbox: int | None = None,
+    letterbox: int | None = DEFAULT_LETTERBOX,
     delete_source: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
@@ -860,7 +876,9 @@ def us(
     letterbox : int, optional
         Fit every clip into a square frame of this edge length, preserving
         aspect and zero-padding the short side. Uniform shapes batch without
-        a per-item resize, and 256 is a fifth of the size of native.
+        a per-item resize. Defaults to ``DEFAULT_LETTERBOX``, and that
+        constant's comment records the measurement behind the size. Pass
+        ``None`` to store native crops.
     delete_source : bool, optional
         Delete each archive once its clips have been written *and* verified.
         Off by default: it is not reversible without another download.

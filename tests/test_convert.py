@@ -18,6 +18,7 @@ from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 # Custom libraries
 from air_download.us_ct.convert import (
+    DEFAULT_LETTERBOX,
     ConversionError,
     build_affine,
     convert_ct_archive,
@@ -725,6 +726,36 @@ class TestLetterbox:
         make_us_archive(root / "A0001.zip", [{}])
         with pytest.raises(ValueError, match="letterbox must be at least 1"):
             us(tmp_path / "cohort", tmp_path / "arrays", letterbox=0)
+
+    def test_the_cohort_run_letterboxes_by_default(self, tmp_path):
+        """`us` stores a square, so a conversion cannot forget the resize."""
+        root = tmp_path / "cohort" / "P0001" / "visit-01" / "us"
+        make_us_archive(root / "A0001.zip", [{"n_frames": 40}])
+        us(tmp_path / "cohort", tmp_path / "arrays", min_frames=20, grayscale=True)
+        clip = zarr.open_group(
+            tmp_path / "arrays" / "P0001" / "visit-01" / "us" / "A0001.zarr",
+            mode="r",
+        )["clip-0000"]
+        assert clip.shape[1:] == (DEFAULT_LETTERBOX, DEFAULT_LETTERBOX)
+        assert clip.attrs["letterbox"] == DEFAULT_LETTERBOX
+
+    def test_an_explicit_none_still_stores_native_crops(self, tmp_path):
+        """The 25 exams converted before the default was set read this way."""
+        root = tmp_path / "cohort" / "P0001" / "visit-01" / "us"
+        make_us_archive(root / "A0001.zip", [{"n_frames": 40}])
+        us(
+            tmp_path / "cohort",
+            tmp_path / "arrays",
+            min_frames=20,
+            grayscale=True,
+            letterbox=None,
+        )
+        clip = zarr.open_group(
+            tmp_path / "arrays" / "P0001" / "visit-01" / "us" / "A0001.zarr",
+            mode="r",
+        )["clip-0000"]
+        assert clip.shape[1:] != (DEFAULT_LETTERBOX, DEFAULT_LETTERBOX)
+        assert clip.attrs["letterbox"] is None
 
     def test_chunking_grows_when_frames_shrink(self, tmp_path):
         # A letterboxed frame is a fraction of the size, so an 8-frame chunk
