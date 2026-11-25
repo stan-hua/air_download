@@ -7,7 +7,7 @@ Every identifier, date and answer here is synthetic.
 import csv
 import json
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 # Non-standard libraries
@@ -18,6 +18,7 @@ from air_download.crosswalk import CROSSWALK_CSV_HEADER
 from air_download.us_ct.cohort import download_cohort
 from air_download.us_ct.labels import build_rows, read_pairs, read_splits
 from air_download.us_ct.split import (
+    FIRST_COLUMN,
     ORDER_COLUMN,
     SPLITS,
     SPLIT_COLUMN,
@@ -31,6 +32,8 @@ from air_download.us_ct.split import (
     read_matched_rows,
     split_counts,
     stratified_sample,
+    visit_sort_key,
+    visit_year,
     write_split,
 )
 
@@ -248,6 +251,74 @@ class TestStratifyFindings:
         )
 
 
+class TestFirstPerPatient:
+    """One exam per patient, so an exam is an independent unit."""
+
+    def _marked(self, rows, positives, **kwargs):
+        out = assign_splits(rows, positives, val_exams=200, seed=7, **kwargs)
+        return out, [r for r in out if r[FIRST_COLUMN] == "1"]
+
+    def test_every_reported_patient_is_marked_exactly_once(self):
+        rows = cohort(400)
+        positives = reported(rows)
+        out, marked = self._marked(rows, positives)
+        per_patient = Counter(row["mrn"] for row in marked)
+        assert set(per_patient.values()) == {1}
+        eligible = {
+            row["mrn"]
+            for row in out
+            if row[SPLIT_COLUMN] != "unreported"
+        }
+        assert set(per_patient) == eligible
+
+    def test_a_validation_or_training_patient_is_marked_on_its_earliest_visit(self):
+        rows = cohort(400)
+        positives = reported(rows)
+        out, marked = self._marked(rows, positives)
+        by_patient = defaultdict(list)
+        for row in out:
+            if row[SPLIT_COLUMN] in ("val", "train"):
+                by_patient[row["mrn"]].append(row)
+        for row in marked:
+            if row[SPLIT_COLUMN] not in ("val", "train"):
+                continue
+            earliest = min(by_patient[row["mrn"]], key=visit_sort_key)
+            assert visit_sort_key(row) == visit_sort_key(earliest)
+
+    def test_a_test_patient_is_marked_inside_the_test_year(self):
+        """The test split also holds a test patient's earlier visits, to keep
+        one patient off both sides. Those visits come from the era the model
+        trains on, so none of them can represent the patient."""
+        rows = cohort(400)
+        positives = reported(rows)
+        _out, marked = self._marked(rows, positives)
+        test_rows = [r for r in marked if r[SPLIT_COLUMN] == SPLIT_TEST]
+        assert test_rows
+        assert all(visit_year(row) == 2026 for row in test_rows)
+
+    def test_an_unreported_exam_is_never_marked(self):
+        rows = cohort(400)
+        positives = reported(rows)
+        # Drop one patient's answers so their visits are unreported.
+        dropped = rows[0]["mrn"]
+        positives = {
+            accession: findings
+            for accession, findings in positives.items()
+            if accession not in {r["ct_accession_number"] for r in rows if r["mrn"] == dropped}
+        }
+        out, marked = self._marked(rows, positives)
+        assert all(row[SPLIT_COLUMN] != "unreported" for row in marked)
+        assert dropped not in {row["mrn"] for row in marked}
+
+    def test_the_written_file_keeps_the_column_last(self, tmp_path):
+        rows = cohort(40)
+        out = assign_splits(rows, reported(rows), val_exams=10, seed=1)
+        path = write_split(out, tmp_path / "split.csv")
+        with path.open(newline="") as handle:
+            header = next(csv.reader(handle))
+        assert header[-3:] == [SPLIT_COLUMN, ORDER_COLUMN, FIRST_COLUMN]
+
+
 class TestSplitCounts:
     def test_counts_only(self):
         rows = cohort(60)
@@ -329,8 +400,18 @@ class TestDownloadBySplit:
 class TestLabelsCarryTheSplit:
     def test_split_and_order_reach_the_table(self, tmp_path):
         split_rows = [
-            {**visit("111", 1, 2024), SPLIT_COLUMN: "train", ORDER_COLUMN: "1"},
-            {**visit("222", 1, 2024), SPLIT_COLUMN: "val", ORDER_COLUMN: ""},
+            {
+                **visit("111", 1, 2024),
+                SPLIT_COLUMN: "train",
+                ORDER_COLUMN: "1",
+                FIRST_COLUMN: "1",
+            },
+            {
+                **visit("222", 1, 2024),
+                SPLIT_COLUMN: "val",
+                ORDER_COLUMN: "",
+                FIRST_COLUMN: "0",
+            },
         ]
         split_path = write_split(split_rows, tmp_path / "split.csv")
 
@@ -351,12 +432,27 @@ class TestLabelsCarryTheSplit:
         rows, _variants, _unreported = build_rows(
             read_pairs(crosswalk), {}, {}, "v", splits=read_splits(split_path)
         )
-        assert {(r["anon_mrn"], r["split"], r["train_order"]) for r in rows} == {
-            ("P0001", "train", "1"),
-            ("P0002", "val", ""),
+        assert {
+            (r["anon_mrn"], r["split"], r["train_order"], r["first_per_patient"])
+            for r in rows
+        } == {
+            ("P0001", "train", "1", "1"),
+            ("P0002", "val", "", "0"),
         }
         # The join key stays out of the table
         assert all("mrn" not in row and "us_accession_number" not in row for row in rows)
+
+    def test_a_split_file_without_the_mark_is_refused(self, tmp_path):
+        """An older split file predates `first_per_patient`. Raising beats
+        reading every pair as unmarked, which would silently download nothing."""
+        path = tmp_path / "old-split.csv"
+        with path.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["mrn", "us_accession_number", "ct_accession_number",
+                             "split", "train_order"])
+            writer.writerow(["111", "U1", "C1", "train", "1"])
+        with pytest.raises(ValueError, match="first_per_patient"):
+            read_splits(path)
 
 
 class TestMain:

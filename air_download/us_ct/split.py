@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 SPLIT_COLUMN = "split"
 ORDER_COLUMN = "train_order"
 
+# Marks the one exam per patient that a download pulls. A patient contributes
+# one pair, so every analysis treats exams as independent and no figure has to
+# be averaged within a patient first. `ifast/docs/PRETRAINING.md` records what
+# the restriction costs.
+FIRST_COLUMN = "first_per_patient"
+
 SPLIT_TEST = "test"
 SPLIT_VAL = "val"
 SPLIT_TRAIN = "train"
@@ -211,6 +217,16 @@ def finding_positives(
         }
         for report, by_finding in answers.items()
     }
+
+
+def visit_sort_key(visit: dict[str, str]) -> tuple[str, str]:
+    """Order a patient's visits in time, falling back to the accession number.
+
+    The ultrasound timestamp is the clock this cohort was matched on. A visit
+    with no timestamp sorts first, and the accession number breaks a tie so the
+    order never depends on dictionary insertion.
+    """
+    return (visit.get("us_date_time") or "", visit["ct_accession_number"])
 
 
 def visit_year(row: dict[str, str]) -> int | None:
@@ -398,7 +414,7 @@ def assign_splits(
     rng.shuffle(val_order)
 
     def by_date(visits):
-        return sorted(visits, key=lambda v: (v.get("us_date_time") or "", v["ct_accession_number"]))
+        return sorted(visits, key=visit_sort_key)
 
     out: list[dict[str, str]] = []
     for mrn in val_order:
@@ -422,7 +438,54 @@ def assign_splits(
         split = SPLIT_TEST if mrn in test_patients else SPLIT_UNREPORTED
         for visit in by_date(visits):
             out.append({**visit, SPLIT_COLUMN: split, ORDER_COLUMN: ""})
-    return out
+    return mark_first_per_patient(out, test_year=test_year)
+
+
+def mark_first_per_patient(
+    rows: list[dict[str, str]], test_year: int = TEST_YEAR
+) -> list[dict[str, str]]:
+    """Mark one exam per patient, which is the exam a download pulls.
+
+    A patient represented by one exam makes every exam an independent unit, so
+    a bootstrap over patients and one over exams become the same thing.
+
+    Which exam represents the patient depends on the split. A validation or
+    training patient is represented by their earliest visit. A test patient is
+    represented by their earliest visit **in the test year**, because the test
+    split also holds their earlier visits to keep a patient off both sides of
+    the split, and an earlier visit comes from the era the model trains on. A
+    patient whose exams have no report is marked nowhere.
+
+    Parameters
+    ----------
+    rows : list of dict
+        Rows that already have `SPLIT_COLUMN`, from `assign_splits`.
+    test_year : int, optional
+        The year the test split holds out.
+
+    Returns
+    -------
+    list of dict
+        The same rows, each with `FIRST_COLUMN` set to "1" or "0".
+    """
+    def key(row):
+        return (row["mrn"], row["us_accession_number"], row["ct_accession_number"])
+
+    best: dict[str, dict[str, str]] = {}
+    for row in rows:
+        split = row[SPLIT_COLUMN]
+        if split == SPLIT_UNREPORTED:
+            continue
+        if split == SPLIT_TEST and visit_year(row) != test_year:
+            continue
+        current = best.get(row["mrn"])
+        if current is None or visit_sort_key(row) < visit_sort_key(current):
+            best[row["mrn"]] = row
+
+    chosen = {key(row) for row in best.values()}
+    for row in rows:
+        row[FIRST_COLUMN] = "1" if key(row) in chosen else "0"
+    return rows
 
 
 def split_counts(rows: list[dict[str, str]], positives: dict[str, set[str]], findings) -> dict:
@@ -445,18 +508,22 @@ def split_counts(rows: list[dict[str, str]], positives: dict[str, set[str]], fin
     """
     patients: dict[str, set[str]] = defaultdict(set)
     exams: Counter = Counter()
+    firsts: Counter = Counter()
     years: dict[str, Counter] = defaultdict(Counter)
     finding_counts: dict[str, Counter] = defaultdict(Counter)
     for row in rows:
         split = row[SPLIT_COLUMN]
         patients[split].add(row["mrn"])
         exams[split] += 1
+        if row.get(FIRST_COLUMN) == "1":
+            firsts[split] += 1
         years[split][visit_year(row)] += 1
         for finding in positives.get(row["ct_accession_number"], ()):
             finding_counts[split][finding] += 1
     return {
         "patients": {split: len(members) for split, members in patients.items()},
         "exams": dict(exams),
+        "firsts": dict(firsts),
         "years": {split: dict(counter) for split, counter in years.items()},
         "findings": {
             finding: {split: finding_counts[split][finding] for split in SPLITS}
@@ -482,9 +549,10 @@ def write_split(rows: list[dict[str, str]], output: str | Path) -> Path:
     """
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    columns = [column for column in rows[0] if column not in (SPLIT_COLUMN, ORDER_COLUMN)]
+    added = (SPLIT_COLUMN, ORDER_COLUMN, FIRST_COLUMN)
+    columns = [column for column in rows[0] if column not in added]
     with output.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=[*columns, SPLIT_COLUMN, ORDER_COLUMN])
+        writer = csv.DictWriter(handle, fieldnames=[*columns, *added])
         writer.writeheader()
         writer.writerows(rows)
     return output
@@ -493,11 +561,14 @@ def write_split(rows: list[dict[str, str]], output: str | Path) -> Path:
 def log_counts(counts: dict) -> None:
     """Log what `split_counts` returned. Every value is a count."""
     for split in SPLITS:
+        # One exam per patient is marked, so the last two columns agree unless
+        # something has gone wrong in the marking.
         logger.info(
-            "%-10s %6d patient(s), %6d exam(s)",
+            "%-10s %6d patient(s), %6d exam(s), %6d marked first per patient",
             split,
             counts["patients"].get(split, 0),
             counts["exams"].get(split, 0),
+            counts["firsts"].get(split, 0),
         )
     all_years = sorted({year for by_year in counts["years"].values() for year in by_year if year})
     logger.info("Exams per year, val / train / test:")

@@ -138,6 +138,11 @@ KEY_COLUMNS = (
     "decode_version",
     "split",
     "train_order",
+    # Whether this is the one pair the cohort keeps for this patient. A
+    # download pulls the marked pairs, so an exam is an independent unit and
+    # no figure has to be averaged within a patient first.
+    # `ifast/docs/PRETRAINING.md` states the rule and what it costs.
+    "first_per_patient",
 )
 
 
@@ -540,8 +545,8 @@ def decode_digest(answers: str | Path) -> tuple[str, dict]:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8], decode
 
 
-def read_splits(path: str | Path) -> dict[tuple[str, str, str], tuple[str, str]]:
-    """Read the split and training order `air_split` gave each pair.
+def read_splits(path: str | Path) -> dict[tuple[str, str, str], tuple[str, str, str]]:
+    """Read the split, training order and per-patient mark `air_split` gave each pair.
 
     Parameters
     ----------
@@ -553,12 +558,19 @@ def read_splits(path: str | Path) -> dict[tuple[str, str, str], tuple[str, str]]
     -------
     dict
         ``(mrn, us_accession_number, ct_accession_number)`` to
-        ``(split, train_order)``.
+        ``(split, train_order, first_per_patient)``.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist.")
-    columns = ("mrn", "us_accession_number", "ct_accession_number", "split", "train_order")
+    columns = (
+        "mrn",
+        "us_accession_number",
+        "ct_accession_number",
+        "split",
+        "train_order",
+        "first_per_patient",
+    )
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         missing = [c for c in columns if c not in (reader.fieldnames or [])]
@@ -568,6 +580,7 @@ def read_splits(path: str | Path) -> dict[tuple[str, str, str], tuple[str, str]]
             tuple(as_identifier(row[c]) for c in columns[:3]): (
                 (row["split"] or "").strip(),
                 (row["train_order"] or "").strip(),
+                (row["first_per_patient"] or "").strip(),
             )
             for row in reader
         }
@@ -680,11 +693,12 @@ def build_rows(
                         "severity": severity,
                     }
                 )
-        split, order = ("", "")
+        split, order, first = ("", "", "")
         if splits is not None:
             key = (pair["mrn"], pair["us_accession_number"], pair["ct_accession_number"])
-            split, order = splits.get(key, ("", ""))
+            split, order, first = splits.get(key, ("", "", ""))
         row["split"], row["train_order"] = split, order
+        row["first_per_patient"] = first
         rows.append(row)
 
     if splits is not None:
