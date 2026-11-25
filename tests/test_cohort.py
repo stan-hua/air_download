@@ -200,6 +200,7 @@ class TestReadMatchedPairs:
                 "ct_date_time": "",
                 "split": "",
                 "train_order": "",
+                "first_per_patient": "",
             }
         ]
 

@@ -376,8 +376,27 @@ def split_file(tmp_path):
 
 class TestDownloadBySplit:
     def test_only_the_split_is_downloaded(self, tmp_path, split_file, capsys):
+        """One pair per patient by default, so this is the marked val rows."""
         path, out = split_file
         download_cohort(matched_csv=path, output=tmp_path / "out", split="val", dry_run=True)
+        printed = [line for line in capsys.readouterr().out.splitlines() if line.endswith(".zip")]
+        marked = sum(
+            1 for row in out
+            if row[SPLIT_COLUMN] == "val" and row[FIRST_COLUMN] == "1"
+        )
+        assert marked
+        assert len(printed) == 2 * marked
+
+    def test_the_mark_can_be_turned_off(self, tmp_path, split_file, capsys):
+        """Every pair of the split, for a run that wants the repeat visits."""
+        path, out = split_file
+        download_cohort(
+            matched_csv=path,
+            output=tmp_path / "out",
+            split="val",
+            first_per_patient=False,
+            dry_run=True,
+        )
         printed = [line for line in capsys.readouterr().out.splitlines() if line.endswith(".zip")]
         assert len(printed) == 2 * sum(1 for row in out if row[SPLIT_COLUMN] == "val")
 

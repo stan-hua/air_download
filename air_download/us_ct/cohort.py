@@ -87,7 +87,7 @@ REQUIRED_COLUMNS = (
 # Read when present, but not required: a matched CSV written before this
 # column existed must still work, as with `us_image_count`. `split` and
 # `train_order` come from `air_split`, and `--split` filters on the first.
-OPTIONAL_COLUMNS = ("ct_date_time", "split", "train_order")
+OPTIONAL_COLUMNS = ("ct_date_time", "split", "train_order", "first_per_patient")
 
 _UNSAFE_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -322,6 +322,7 @@ def download_cohort(
     converted_dir: str | Path | None = None,
     n: int | None = None,
     split: str | None = None,
+    first_per_patient: bool = True,
     url: str | None = None,
     cred_path: str | Path | None = None,
     project: int | None = None,
@@ -367,6 +368,10 @@ def download_cohort(
         Download only the first ``n`` visits, ordered as they will be
         numbered. Use it to verify one visit before committing to the whole
         cohort.
+    first_per_patient : bool, optional
+        Download only the one pair each patient contributes, which `air_split`
+        marks. On by default, so ``--n`` counts patients. Pass ``False`` to
+        download every pair of the selection.
     split : str, optional
         Download only the rows whose ``split`` column, from ``air_split``,
         holds this value. Applied before ``n``, so ``--split train --n 316``
@@ -419,6 +424,27 @@ def download_cohort(
         before = len(rows)
         rows = [row for row in rows if row.get("split") == split]
         logger.info("%d of %d pair(s) are in the %s split.", len(rows), before, split)
+
+    # One pair per patient, so `--n` counts patients and every exam is an
+    # independent unit downstream. A split file written before the column
+    # existed has no mark, and the run goes ahead without the filter.
+    if first_per_patient:
+        if not any(row.get("first_per_patient") for row in rows):
+            logger.warning(
+                "%s has no first_per_patient column, so every pair of the "
+                "selection is downloaded. Re-run `air_split` to mark one pair "
+                "per patient.",
+                matched_csv,
+            )
+        else:
+            before = len(rows)
+            rows = [row for row in rows if row.get("first_per_patient") == "1"]
+            logger.info(
+                "%d of %d pair(s) are the one kept for their patient.",
+                len(rows),
+                before,
+            )
+
     # Sort before slicing, so `--n 1` picks the same visit the full run would
     # number first and the two runs assign identical identifiers.
     rows = sort_rows_for_numbering(rows)
