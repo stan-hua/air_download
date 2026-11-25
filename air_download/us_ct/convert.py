@@ -710,6 +710,7 @@ def convert_us_archive(
     chunk_frames: int = DEFAULT_CHUNK_FRAMES,
     grayscale: bool | None = None,
     letterbox: int | None = None,
+    skip_colour: bool = False,
 ) -> int:
     """Convert one ultrasound archive into a Zarr group, one array per clip.
 
@@ -741,6 +742,12 @@ def convert_us_archive(
         Fit every clip into a square frame of this edge length, preserving
         aspect. Requires ``grayscale``, since a colour clip has no time axis
         to letterbox along.
+    skip_colour : bool, optional
+        Write no clip that `is_grayscale` reports as colour. Colour on an
+        ultrasound means Doppler, which answers a different question from
+        B-mode and which this cohort does not model. The stored array also
+        differs in rank from a B-mode clip, so a reader written for
+        ``(T, H, W)`` gets ``(T, H, W, 3)`` and no error.
 
     Returns
     -------
@@ -748,6 +755,7 @@ def convert_us_archive(
         Number of clips written.
     """
     written = 0
+    colour = 0
     group = None
 
     with zipfile.ZipFile(archive) as zf:
@@ -779,6 +787,9 @@ def convert_us_archive(
                 frames, tight = tighten_to_beamform(frames)
 
             gray = is_grayscale(frames) if grayscale is None else grayscale
+            if not gray and skip_colour:
+                colour += 1
+                continue
             if gray and frames.ndim == 4:
                 # Channels are identical, so any one of them is the picture.
                 frames = frames[..., 0]
@@ -819,10 +830,13 @@ def convert_us_archive(
             )
             written += 1
 
+    if colour:
+        logger.debug("Skipped %d colour clip(s) in %s.", colour, archive.name)
     if not written:
         raise ConversionError(
             f"No ultrasound clip of at least {min_frames} frames in this "
-            f"archive."
+            f"archive"
+            + (f", after skipping {colour} colour clip(s)." if colour else ".")
         )
     verify_us_output(destination, written)
     return written
@@ -836,6 +850,7 @@ def us(
     chunk_frames: int | None = None,
     grayscale: bool | None = None,
     letterbox: int | None = DEFAULT_LETTERBOX,
+    skip_colour: bool = True,
     delete_source: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
@@ -879,6 +894,13 @@ def us(
         a per-item resize. Defaults to ``DEFAULT_LETTERBOX``, and that
         constant's comment records the measurement behind the size. Pass
         ``None`` to store native crops.
+    skip_colour : bool, optional
+        Write no colour clip. On by default: colour on an ultrasound means
+        Doppler, this cohort models B-mode, and a Doppler clip is also stored
+        with a channel axis that a reader written for ``(T, H, W)`` does not
+        expect. Pass False to keep them. An exam whose every clip is Doppler
+        then converts to nothing and the archive is reported as failed, which
+        is the intended outcome.
     delete_source : bool, optional
         Delete each archive once its clips have been written *and* verified.
         Off by default: it is not reversible without another download.
@@ -935,6 +957,7 @@ def us(
                 chunk_frames,
                 grayscale,
                 letterbox,
+                skip_colour,
             )
             converted += 1
             if delete_source:

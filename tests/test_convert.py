@@ -469,6 +469,26 @@ class TestUltrasoundConversion:
         assert clip.attrs["grayscale"] is False
         assert clip.ndim == 4 and clip.shape[-1] == 3
 
+    def test_skip_colour_drops_a_doppler_clip_and_keeps_the_rest(self, tmp_path):
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{"colour": True}, {}]
+        )
+        written = convert_us_archive(
+            archive, tmp_path / "A0001.zarr", min_frames=20, skip_colour=True
+        )
+        group = zarr.open_group(tmp_path / "A0001.zarr", mode="r")
+        assert written == 1
+        assert [group[name].ndim for name in group.array_keys()] == [3]
+
+    def test_an_all_doppler_archive_converts_to_nothing(self, tmp_path):
+        """Discarding Doppler leaves such an exam with no clip, and the caller
+        reports the archive as failed, which is how it gets left out."""
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"colour": True}])
+        with pytest.raises(ConversionError, match="colour"):
+            convert_us_archive(
+                archive, tmp_path / "A0001.zarr", min_frames=20, skip_colour=True
+            )
+
     def test_a_truly_grayscale_clip_loses_its_channel_axis(self, tmp_path):
         archive = make_us_archive(tmp_path / "A0001.zip", [{}])
         convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
