@@ -437,7 +437,19 @@ def assign_splits(
             continue
         split = SPLIT_TEST if mrn in test_patients else SPLIT_UNREPORTED
         for visit in by_date(visits):
-            out.append({**visit, SPLIT_COLUMN: split, ORDER_COLUMN: ""})
+            # The test set follows the patient's year, so this branch covers a
+            # test patient's exam whether or not the extraction read its CT
+            # report. An exam with no answer row has no label, and an
+            # unscorable exam in the sealed set understates every metric over
+            # it, so it goes to `unreported` as it does in the other two draws.
+            reported = visit["ct_accession_number"] in positives
+            out.append(
+                {
+                    **visit,
+                    SPLIT_COLUMN: split if reported else SPLIT_UNREPORTED,
+                    ORDER_COLUMN: "",
+                }
+            )
     return mark_first_per_patient(out, test_year=test_year)
 
 
@@ -503,21 +515,33 @@ def split_counts(rows: list[dict[str, str]], positives: dict[str, set[str]], fin
     Returns
     -------
     dict
-        ``patients``, ``exams``, ``years`` and ``findings``, each keyed by split.
-        Every value is a count.
+        ``patients``, ``exams``, ``years``, ``unanswered`` and ``findings``,
+        each keyed by split. Every value is a count.
     """
     patients: dict[str, set[str]] = defaultdict(set)
     exams: Counter = Counter()
     firsts: Counter = Counter()
     years: dict[str, Counter] = defaultdict(Counter)
+    unanswered: Counter = Counter()
+    unanswered_firsts: Counter = Counter()
     finding_counts: dict[str, Counter] = defaultdict(Counter)
     for row in rows:
         split = row[SPLIT_COLUMN]
         patients[split].add(row["mrn"])
         exams[split] += 1
-        if row.get(FIRST_COLUMN) == "1":
+        marked = row.get(FIRST_COLUMN) == "1"
+        if marked:
             firsts[split] += 1
         years[split][visit_year(row)] += 1
+        # A CT absent from `positives` produced no answer row, so the
+        # extraction never read its report. `assign_splits` files such an exam
+        # under `unreported` in the validation and training draws, while test
+        # membership follows the patient's year alone. Count it per split, so
+        # a download never takes an exam that can have no label.
+        if row["ct_accession_number"] not in positives:
+            unanswered[split] += 1
+            if marked:
+                unanswered_firsts[split] += 1
         for finding in positives.get(row["ct_accession_number"], ()):
             finding_counts[split][finding] += 1
     return {
@@ -525,6 +549,8 @@ def split_counts(rows: list[dict[str, str]], positives: dict[str, set[str]], fin
         "exams": dict(exams),
         "firsts": dict(firsts),
         "years": {split: dict(counter) for split, counter in years.items()},
+        "unanswered": dict(unanswered),
+        "unanswered_firsts": dict(unanswered_firsts),
         "findings": {
             finding: {split: finding_counts[split][finding] for split in SPLITS}
             for finding in findings
@@ -570,6 +596,17 @@ def log_counts(counts: dict) -> None:
             counts["exams"].get(split, 0),
             counts["firsts"].get(split, 0),
         )
+    for split in SPLITS:
+        missing = counts.get("unanswered", {}).get(split, 0)
+        if missing:
+            logger.warning(
+                "%-10s %6d exam(s) whose CT report the extraction never read, "
+                "%d of them marked first per patient. Such an exam has no "
+                "label, so leave it out of a download.",
+                split,
+                missing,
+                counts.get("unanswered_firsts", {}).get(split, 0),
+            )
     all_years = sorted({year for by_year in counts["years"].values() for year in by_year if year})
     logger.info("Exams per year, val / train / test:")
     for year in all_years:

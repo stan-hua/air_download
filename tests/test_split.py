@@ -139,6 +139,19 @@ class TestAssignSplits:
         out = assign_splits(rows, reported(rows), val_exams=10, seed=0)
         assert {row[SPLIT_COLUMN] for row in out if row["mrn"] == "1"} == {"test"}
 
+    def test_a_test_patients_unreported_exam_leaves_the_test_set(self):
+        """Test membership follows the patient's year, so without this an exam
+        whose CT report the extraction never read would land in the sealed set
+        with no label to score it against."""
+        rows = [visit("1", 1, 2026), visit("1", 2, 2026), visit("2", 1, 2024)] + cohort(40)
+        positives = reported(rows)
+        missing = rows[0]["ct_accession_number"]
+        del positives[missing]
+        out = assign_splits(rows, positives, val_exams=10, seed=0)
+        by_accession = {row["ct_accession_number"]: row[SPLIT_COLUMN] for row in out}
+        assert by_accession[missing] == "unreported"
+        assert by_accession[rows[1]["ct_accession_number"]] == SPLIT_TEST
+
     def test_a_patient_is_in_one_split(self):
         rows = cohort(80)
         out = assign_splits(rows, reported(rows), val_exams=20, seed=0)
@@ -327,6 +340,17 @@ class TestSplitCounts:
         counts = split_counts(out, positives, ["ascites"])
         assert sum(counts["exams"].values()) == len(rows)
         assert set(counts["findings"]["ascites"]) == set(SPLITS)
+
+    def test_an_exam_with_no_answers_is_counted_as_unanswered(self):
+        rows = cohort(60)
+        positives = reported(rows)
+        missing = rows[0]["ct_accession_number"]
+        del positives[missing]
+        out = assign_splits(rows, positives, val_exams=15, seed=0)
+        counts = split_counts(out, positives, ["ascites"])
+        assert sum(counts["unanswered"].values()) == 1
+        assert set(counts["unanswered"]) == {"unreported"}
+        assert sum(counts["unanswered_firsts"].values()) == 0
 
     def test_the_test_split_is_counted(self):
         """The sealed split's positives bound the claim it has to support, so
