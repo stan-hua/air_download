@@ -81,13 +81,36 @@ TEST_YEAR = 2026
 # tier per finding, and tier C is everything outside the windows.
 INCLUDED_TIERS = ("A", "B")
 
+# The dry run reports on every tier. Stratifying on tier C would redraw the
+# split, and the counts are still worth printing. The seven compartment
+# questions outside a FAST window are probe targets in `ifast`, so their
+# positives per split decide whether the probe's macro is measurable. Reading
+# them also quiets the "out of step" warning, which fired on 202,896 tier C
+# answer rows that the question set asks for by design.
+REPORTED_TIERS = ("A", "B", "C")
+
 DEFAULT_LOCK = "../rate/config/modalities/fast_abdomen_ct.lock.json"
 DEFAULT_VAL_EXAMS = 1000
-DEFAULT_SEED = 20261111
+
+# `air_split` drew the frozen split with this seed on 2026-11-25. It stays the
+# default so that a re-run reproduces that split instead of drawing a new one.
+# Anyone can then regenerate the frozen file and compare it.
+DEFAULT_SEED = 20261125
 
 # The prefix a year takes among the stratification labels, so a year cannot
 # collide with a finding's name
 YEAR_LABEL = "year:"
+
+# The same for the dictation template. The template is nearly an era -- the
+# 2026-11-18 extraction counts template A alone from 2019 to 2021 and both from
+# 2022 on -- so the year label balances it before 2022 and leaves the later
+# years to chance. The template needs an axis of its own because it moves a
+# label's prevalence: over that run `ascites` answers Yes on 11.8% of template A
+# reports against 8.0% of template B, and `liver_laceration` on 1.2% against
+# 0.55%, and both gaps survive conditioning on the trauma indication. A draw
+# unbalanced on this axis would bias those two labels, and they are the two
+# closest to the project's question.
+TEMPLATE_LABEL = "template:"
 
 
 def read_matched_rows(csv_path: str | Path) -> list[dict[str, str]]:
@@ -278,6 +301,8 @@ def assign_splits(
     val_exams: int = DEFAULT_VAL_EXAMS,
     seed: int = DEFAULT_SEED,
     test_year: int = TEST_YEAR,
+    templates: dict[str, str] | None = None,
+    stratify_findings: bool = False,
 ) -> list[dict[str, str]]:
     """Give every matched pair a split, and the training pairs an order.
 
@@ -295,6 +320,17 @@ def assign_splits(
         Seeds both the validation draw and the training order.
     test_year : int, optional
         Every visit of a patient with an ultrasound in this year is test data.
+    templates : dict, optional
+        CT accession number to the dictation template of its report, from
+        `read_answers`. Each one becomes a stratification label, so the
+        validation draw gets its share of both templates. Omitted leaves the
+        draw stratified on the year alone.
+    stratify_findings : bool, optional
+        Add each patient's positive findings to its stratification labels.
+        Off since 2026-11-25. The comment in the body records the measurement:
+        the findings move the compartment macro's detectable difference by
+        0.0001, and they would tie the split to a label set that a
+        re-extraction can change.
 
     Returns
     -------
@@ -320,9 +356,31 @@ def assign_splits(
         if not reported:
             continue
         years = [year for year in map(visit_year, reported) if year is not None]
-        patient_labels = set().union(*(positives[v["ct_accession_number"]] for v in reported))
+        # The findings are off by default. A simulation of 500 draws on the
+        # 2026-11-18 extraction measured what they buy. Stratifying on them
+        # moves the compartment macro's detectable difference from 0.0254 to
+        # 0.0253, which is nothing. It also keeps a rare label's count closer
+        # to its average without making that label measurable.
+        # `peritoneal_carcinomatosis` draws 5.2 +- 1.1 positives stratified
+        # against 5.2 +- 2.8 uniform, and either figure has a 95% interval of
+        # about +-0.23. Stratifying on them would also cost a dependency: a
+        # split stratified on a label set cannot outlive a re-extraction that
+        # moves one. Year and template stay, because both are structural and
+        # neither comes from an answer.
+        patient_labels = (
+            set().union(*(positives[v["ct_accession_number"]] for v in reported))
+            if stratify_findings
+            else set()
+        )
         if years:
             patient_labels.add(f"{YEAR_LABEL}{min(years)}")
+        for visit in reported:
+            # A patient with visits under both templates takes both labels,
+            # which is what iterative stratification over a multi-label set
+            # expects.
+            template = (templates or {}).get(visit["ct_accession_number"], "")
+            if template:
+                patient_labels.add(f"{TEMPLATE_LABEL}{template}")
         labels[mrn] = patient_labels
         exams_per_patient[mrn] = len(reported)
 
@@ -401,7 +459,7 @@ def split_counts(rows: list[dict[str, str]], positives: dict[str, set[str]], fin
         "exams": dict(exams),
         "years": {split: dict(counter) for split, counter in years.items()},
         "findings": {
-            finding: {split: finding_counts[split][finding] for split in (SPLIT_VAL, SPLIT_TRAIN)}
+            finding: {split: finding_counts[split][finding] for split in SPLITS}
             for finding in findings
         },
     }
@@ -449,9 +507,15 @@ def log_counts(counts: dict) -> None:
             year,
             *(counts["years"].get(split, {}).get(year, 0) for split in (SPLIT_VAL, SPLIT_TRAIN, SPLIT_TEST)),
         )
-    logger.info("Positive exams per finding, val / train:")
+    logger.info("Positive exams per finding, val / train / test:")
     for finding, by_split in sorted(counts["findings"].items()):
-        logger.info("  %-55s %4d / %5d", finding, by_split[SPLIT_VAL], by_split[SPLIT_TRAIN])
+        logger.info(
+            "  %-55s %4d / %5d / %4d",
+            finding,
+            by_split[SPLIT_VAL],
+            by_split[SPLIT_TRAIN],
+            by_split[SPLIT_TEST],
+        )
 
 
 def main(
@@ -462,6 +526,7 @@ def main(
     val_exams: int = DEFAULT_VAL_EXAMS,
     seed: int = DEFAULT_SEED,
     test_year: int = TEST_YEAR,
+    stratify_findings: bool = False,
     dry_run: bool = False,
 ) -> None:
     """Split the match list into test, validation and training, and order the training pairs.
@@ -482,6 +547,9 @@ def main(
         Seeds the draw and the order. Record it; the split is frozen once drawn.
     test_year : int, optional
         The year whose patients are held out as test data.
+    stratify_findings : bool, optional
+        Add the findings to the stratification labels. Off by default, and
+        `assign_splits` records the measurement behind that.
     dry_run : bool, optional
         Print the counts and write nothing.
     """
@@ -496,17 +564,40 @@ def main(
         )
 
     findings = included_findings(lock)
+    reported = included_findings(lock, tiers=REPORTED_TIERS)
     wordings = sum(findings.values())
-    logger.info("%d included finding(s) over %d wording(s).", len(findings), wordings)
+    logger.info(
+        "%d included finding(s) over %d wording(s); %d reported.",
+        len(findings),
+        wordings,
+        len(reported),
+    )
 
     rows = read_matched_rows(matched)
     wanted = {row["ct_accession_number"] for row in rows}
-    found, _templates, _levels = read_answers(answers, wanted, set(findings))
-    positives = finding_positives(found, findings)
+    found, templates, _levels = read_answers(answers, wanted, set(reported))
+    positives = finding_positives(found, reported)
 
-    split = assign_splits(rows, positives, val_exams=val_exams, seed=seed, test_year=test_year)
-    log_counts(split_counts(split, positives, findings))
-    logger.info("Seed %d, test year %d, %d validation exam(s) requested.", seed, test_year, val_exams)
+    split = assign_splits(
+        rows,
+        # The draw stratifies on the included tiers alone, so widening the
+        # report above cannot move it.
+        finding_positives(found, findings),
+        val_exams=val_exams,
+        seed=seed,
+        test_year=test_year,
+        templates=templates,
+        stratify_findings=stratify_findings,
+    )
+    log_counts(split_counts(split, positives, reported))
+    logger.info(
+        "Seed %d, test year %d, %d validation exam(s) requested, "
+        "stratified on year and template%s.",
+        seed,
+        test_year,
+        val_exams,
+        " and the findings" if stratify_findings else "",
+    )
 
     if dry_run:
         logger.info("Dry run: nothing written.")

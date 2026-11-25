@@ -19,7 +19,11 @@ from air_download.us_ct.cohort import download_cohort
 from air_download.us_ct.labels import build_rows, read_pairs, read_splits
 from air_download.us_ct.split import (
     ORDER_COLUMN,
+    SPLITS,
     SPLIT_COLUMN,
+    SPLIT_TEST,
+    TEMPLATE_LABEL,
+    YEAR_LABEL,
     assign_splits,
     finding_positives,
     included_findings,
@@ -178,6 +182,71 @@ class TestAssignSplits:
         with pytest.raises(ValueError, match="too few"):
             assign_splits(rows, reported(rows), val_exams=1000, seed=0)
 
+    def test_no_templates_leaves_the_draw_as_it_was(self):
+        """Every split drawn before 2026-11-24 passed none, so the default has
+        to reproduce them."""
+        rows = cohort(80)
+        positives = reported(rows)
+        without = assign_splits(rows, positives, val_exams=20, seed=3)
+        empty = assign_splits(rows, positives, val_exams=20, seed=3, templates={})
+        key = lambda out: [(r["ct_accession_number"], r[SPLIT_COLUMN]) for r in out]  # noqa: E731
+        assert key(without) == key(empty)
+
+    def test_the_validation_draw_gets_both_templates(self):
+        rows = cohort(80)
+        positives = reported(rows)
+        # One exam in four is template B, so an unstratified draw could miss it.
+        templates = {
+            row["ct_accession_number"]: ("B" if index % 4 == 0 else "A")
+            for index, row in enumerate(rows)
+        }
+        out = assign_splits(rows, positives, val_exams=20, seed=3, templates=templates)
+        drawn = {
+            templates[row["ct_accession_number"]]
+            for row in out
+            if row[SPLIT_COLUMN] == "val"
+        }
+        assert drawn == {"A", "B"}
+
+    def test_a_template_label_cannot_collide_with_a_finding(self):
+        """The prefix keeps the two apart, the way `YEAR_LABEL` does."""
+        assert TEMPLATE_LABEL.endswith(":")
+        assert TEMPLATE_LABEL != YEAR_LABEL
+
+
+class TestStratifyFindings:
+    """The findings are off by default, so a label change cannot move a split."""
+
+    def _val(self, rows, positives, **kwargs):
+        out = assign_splits(rows, positives, val_exams=200, seed=7, **kwargs)
+        return {row["mrn"] for row in out if row[SPLIT_COLUMN] == "val"}
+
+    def test_the_default_draw_ignores_which_findings_a_report_has(self):
+        """Re-extracting the answers must leave a frozen split valid. Only the
+        finding sets move here. Every report stays reported, so the exam
+        structure and the year and template labels are untouched."""
+        rows = cohort(400)
+        first = reported(rows, seed=0)
+        second = reported(rows, seed=99)
+        assert first != second
+        assert set(first) == set(second)
+        assert self._val(rows, first) == self._val(rows, second)
+
+    def test_turning_it_on_makes_the_draw_depend_on_them(self):
+        rows = cohort(400)
+        first = reported(rows, seed=0)
+        second = reported(rows, seed=99)
+        drawn = self._val(rows, first, stratify_findings=True)
+        assert drawn != self._val(rows, second, stratify_findings=True)
+
+    def test_it_changes_the_draw_from_the_default(self):
+        """The flag reproduces a split drawn before 2026-11-25."""
+        rows = cohort(400)
+        positives = reported(rows, seed=0)
+        assert self._val(rows, positives) != self._val(
+            rows, positives, stratify_findings=True
+        )
+
 
 class TestSplitCounts:
     def test_counts_only(self):
@@ -186,7 +255,24 @@ class TestSplitCounts:
         out = assign_splits(rows, positives, val_exams=15, seed=0)
         counts = split_counts(out, positives, ["ascites"])
         assert sum(counts["exams"].values()) == len(rows)
-        assert set(counts["findings"]["ascites"]) == {"val", "train"}
+        assert set(counts["findings"]["ascites"]) == set(SPLITS)
+
+    def test_the_test_split_is_counted(self):
+        """The sealed split's positives bound the claim it has to support, so
+        a power calculation needs them before anything is trained. Counting how
+        often a label occurs does not let a model see the split."""
+        rows = cohort(60)
+        positives = reported(rows)
+        out = assign_splits(rows, positives, val_exams=15, seed=0)
+        counts = split_counts(out, positives, ["ascites"])
+        drawn = {row[SPLIT_COLUMN] for row in out}
+        assert SPLIT_TEST in drawn
+        assert counts["findings"]["ascites"][SPLIT_TEST] == sum(
+            1
+            for row in out
+            if row[SPLIT_COLUMN] == SPLIT_TEST
+            and "ascites" in positives.get(row["ct_accession_number"], ())
+        )
 
 
 class TestReadMatchedRows:
