@@ -28,6 +28,27 @@ from air_download.utils import (
 
 logger = logging.getLogger(__name__)
 
+# The portal returns this in `code` when a project has drawn as many
+# archives as its quota allows. Measured against a project at its limit.
+RETRIEVE_LIMIT_CODE = -2
+
+
+class ProjectRetrieveLimitError(RuntimeError):
+    """The project has retrieved as many archives as its quota allows.
+
+    A caller that keeps going spends one refused request per remaining exam
+    and gets nothing for any of them, so this is the one download failure
+    worth separating from the rest. It derives from `RuntimeError` because
+    that is what the refusal path raised before.
+    """
+
+    def __init__(self, reason: str, current: int | None, limit: int | None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.current = current
+        self.limit = limit
+
+
 DEFAULT_SOURCE_ID = 1
 
 # Retry policy for transient API failures. The portal can rate-limit or
@@ -718,10 +739,13 @@ class AIRClient:
             True if the download has started or completed.
 
         Raises:
-            RuntimeError: If the download initiation failed.
+            ProjectRetrieveLimitError: If the project has no quota left.
+            RuntimeError: If the download initiation failed for another reason.
         """
         if "downloadId" not in download_info:
             reason = download_info.get("reason", "")
+            details = download_info.get("details")
+            limits = details if isinstance(details, dict) else {}
             if "project" in reason:
                 logger.error(
                     "Project ID is invalid or missing. Available projects:"
@@ -746,22 +770,25 @@ class AIRClient:
                 # advises retrying it forever. `reason` is the server's own
                 # account of why it declined; the other keys are named rather
                 # than printed, because a response may echo the study back.
-                details = download_info.get("details")
-                counters = ""
-                if isinstance(details, dict) and "limit" in details:
-                    # A count is not an identifier, and these two are the
-                    # whole diagnosis: they say how many archives the project
-                    # has drawn and how many it may.
-                    counters = (
-                        f" The project has retrieved {details.get('current')} "
-                        f"of its limit of {details.get('limit')}."
-                    )
+                # A count is not an identifier, and these two are the whole
+                # diagnosis: they say how many archives the project has drawn
+                # and how many it may.
+                counters = (
+                    f" The project has retrieved {limits['current']} of its "
+                    f"limit of {limits['limit']}."
+                    if "limit" in limits and "current" in limits
+                    else ""
+                )
                 logger.error(
                     "The server declined to start the download. Its reason: "
                     "%s. Its code: %s.%s",
                     reason or "(the response had no reason field)",
                     download_info.get("code", "(none given)"),
                     counters,
+                )
+            if download_info.get("code") == RETRIEVE_LIMIT_CODE:
+                raise ProjectRetrieveLimitError(
+                    reason, limits.get("current"), limits.get("limit")
                 )
             raise RuntimeError(
                 f"Download failed. Server response: {download_info}"

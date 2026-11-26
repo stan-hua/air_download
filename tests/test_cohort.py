@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 # Custom libraries
+from air_download.client import ProjectRetrieveLimitError
 from air_download.crosswalk import Crosswalk
 from air_download.us_ct import cohort
 from air_download.us_ct.cohort import (
@@ -749,3 +750,92 @@ class TestLeadingZeroMrn:
         assert first.parts[-4] == "P0001"
         assert second.parts[-4] == "P0002"
         assert first != second
+
+
+class TestAnExhaustedQuota:
+    """Tests for a run that meets the project's download limit.
+
+    Every exam after the refusal would be refused the same way, so a run that
+    kept going would send one request per remaining exam and download none of
+    them. These pin that it stops instead, and that it reports what is left.
+    """
+
+    def test_the_run_stops_at_the_refusal(self, tmp_path, stub_client, monkeypatch):
+        csv_path = write_csv(
+            tmp_path / "m.csv",
+            [
+                ["A1", "U1", "2021-03-02", "C1"],
+                ["A2", "U2", "2021-03-05", "C2"],
+                ["A3", "U3", "2021-03-09", "C3"],
+            ],
+        )
+
+        def refuse_after_the_first(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                kwargs["output"].write_bytes(b"zip-bytes")
+                return None
+            raise ProjectRetrieveLimitError("Project retrieve limit reached", 2000, 2000)
+
+        monkeypatch.setattr(StubClient, "download", refuse_after_the_first)
+        download_cohort(matched_csv=csv_path, output=tmp_path / "out")
+
+        # The first exam, then the one that was refused, and nothing after it.
+        assert len(stub_client.instances[0].calls) == 2
+
+    def test_it_says_how_many_visits_it_never_asked_for(
+        self, tmp_path, stub_client, monkeypatch, caplog
+    ):
+        csv_path = write_csv(
+            tmp_path / "m.csv",
+            [
+                ["A1", "U1", "2021-03-02", "C1"],
+                ["A2", "U2", "2021-03-05", "C2"],
+                ["A3", "U3", "2021-03-09", "C3"],
+            ],
+        )
+
+        def refuse(self, **kwargs):
+            self.calls.append(kwargs)
+            raise ProjectRetrieveLimitError("Project retrieve limit reached", 2000, 2000)
+
+        monkeypatch.setattr(StubClient, "download", refuse)
+        download_cohort(matched_csv=csv_path, output=tmp_path / "out")
+
+        assert "stopped at visit 1 of 3" in caplog.text
+        assert "did not ask for the remaining 2" in caplog.text
+        assert "retrieved 2000 of its limit of 2000" in caplog.text
+
+    def test_it_does_not_advise_a_re_run(
+        self, tmp_path, stub_client, monkeypatch, caplog
+    ):
+        csv_path = write_csv(tmp_path / "m.csv", [["A1", "U1", "2021-03-02", "C1"]])
+
+        def refuse(self, **kwargs):
+            self.calls.append(kwargs)
+            raise ProjectRetrieveLimitError("Project retrieve limit reached", 2000, 2000)
+
+        monkeypatch.setattr(StubClient, "download", refuse)
+        download_cohort(matched_csv=csv_path, output=tmp_path / "out")
+
+        assert "Re-running skips what is already downloaded" not in caplog.text
+        assert "Raise the project's limit and re-run" in caplog.text
+
+    def test_another_failure_still_lets_the_run_finish(
+        self, tmp_path, stub_client, monkeypatch
+    ):
+        csv_path = write_csv(
+            tmp_path / "m.csv",
+            [["A1", "U1", "2021-03-02", "C1"], ["A2", "U2", "2021-03-05", "C2"]],
+        )
+
+        def one_bad_exam(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["accession"] == "U1":
+                raise RuntimeError("boom")
+            kwargs["output"].write_bytes(b"zip-bytes")
+
+        monkeypatch.setattr(StubClient, "download", one_bad_exam)
+        download_cohort(matched_csv=csv_path, output=tmp_path / "out")
+
+        assert len(stub_client.instances[0].calls) == 4

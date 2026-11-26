@@ -63,7 +63,11 @@ import fire
 from tqdm import tqdm
 
 # Custom libraries
-from air_download.client import DEFAULT_MAX_RETRIES, AIRClient
+from air_download.client import (
+    DEFAULT_MAX_RETRIES,
+    AIRClient,
+    ProjectRetrieveLimitError,
+)
 from air_download.crosswalk import (
     Crosswalk,
     default_crosswalk_path,
@@ -471,6 +475,8 @@ def download_cohort(
     crosswalk = Crosswalk(crosswalk_path, read_only=dry_run)
     downloaded: dict[tuple[str, str], Path] = {}
     counts = {"downloaded": 0, "skipped": 0, "copied": 0, "failed": 0}
+    attempted = 0
+    exhausted: ProjectRetrieveLimitError | None = None
 
     client = (
         None
@@ -526,6 +532,12 @@ def download_cohort(
                     ),
                 )
                 counts[outcome] += 1
+            except ProjectRetrieveLimitError as exc:
+                # Every later exam would be refused the same way, so going on
+                # costs one request per remaining exam and downloads nothing.
+                counts["failed"] += 1
+                exhausted = exc
+                break
             except Exception as exc:  # noqa: BLE001 - one bad exam is not fatal
                 counts["failed"] += 1
                 # The status code is the whole diagnosis for an HTTP failure,
@@ -543,6 +555,10 @@ def download_cohort(
                 # Only at DEBUG: the detail can carry an identifier.
                 logger.debug("Failure detail: %s", exc)
 
+        attempted += 1
+        if exhausted is not None:
+            break
+
     if dry_run:
         logger.info(
             "Dry run: %d visit(s) would be written under %s, and no crosswalk "
@@ -552,10 +568,28 @@ def download_cohort(
         )
         return
 
+    if exhausted is not None:
+        logger.error(
+            "The project has no download quota left, so this run stopped at "
+            "visit %d of %d and did not ask for the remaining %d. The server "
+            "said: %s. Raise the project's limit and re-run; what is already "
+            "downloaded is skipped.",
+            attempted,
+            len(rows),
+            len(rows) - attempted,
+            exhausted.reason or "(it gave no reason)",
+        )
+        if exhausted.limit is not None:
+            logger.error(
+                "The project has retrieved %s of its limit of %s.",
+                exhausted.current,
+                exhausted.limit,
+            )
+
     logger.info(
         "Cohort complete across %d visit(s): %d exam(s) downloaded, %d "
         "already present, %d copied from an earlier visit, %d failed.",
-        len(rows),
+        attempted,
         counts["downloaded"],
         counts["skipped"],
         counts["copied"],
@@ -569,7 +603,7 @@ def download_cohort(
         len(crosswalk),
         crosswalk_path,
     )
-    if counts["failed"]:
+    if counts["failed"] and exhausted is None:
         logger.warning(
             "%d exam(s) failed. Re-running skips what is already downloaded.",
             counts["failed"],
