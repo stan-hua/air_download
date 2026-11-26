@@ -340,3 +340,49 @@ class TestAnExpiredTokenIsRefreshed:
         with pytest.raises(requests.HTTPError):
             client._post("secure/search/series", headers=client._auth_header, json={})
         assert logins == []
+
+
+class TestDownloadRefusal:
+    """Tests for what a declined download initiation reports.
+
+    The portal caps how many archives a project may retrieve, and it declines
+    the next one with a reason and two counters rather than an HTTP error. The
+    caller logs an exception class alone, so a run that has exhausted the quota
+    would otherwise read as a transient failure and advise retrying it.
+    """
+
+    @staticmethod
+    def _client(tmp_path):
+        cred_file = tmp_path / "creds.txt"
+        cred_file.write_text(
+            "AIR_USERNAME=user\nAIR_PASSWORD=pass\nAIR_URL=https://example.com/api/\n"
+        )
+        return AIRClient(cred_path=cred_file)
+
+    def test_an_exhausted_quota_names_its_reason_and_counters(self, tmp_path, caplog):
+        client = self._client(tmp_path)
+        response = {
+            "reason": "Project retrieve limit reached",
+            "code": -2,
+            "details": {"current": 2000, "limit": 2000},
+        }
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError):
+            client._check_download_started(response, project=25)
+        logged = caplog.text
+        assert "Project retrieve limit reached" in logged
+        assert "-2" in logged
+        assert "retrieved 2000 of its limit of 2000" in logged
+
+    def test_a_refusal_without_counters_still_reports_its_reason(self, tmp_path, caplog):
+        client = self._client(tmp_path)
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError):
+            client._check_download_started({"reason": "Something else"}, project=25)
+        logged = caplog.text
+        assert "Something else" in logged
+        assert "limit of" not in logged
+
+    def test_a_refusal_with_no_reason_says_so(self, tmp_path, caplog):
+        client = self._client(tmp_path)
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError):
+            client._check_download_started({}, project=25)
+        assert "no reason field" in caplog.text

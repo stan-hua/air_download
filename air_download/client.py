@@ -740,7 +740,29 @@ class AIRClient:
                         p["description"],
                     )
             else:
-                logger.error("Unknown error during download initiation.")
+                # The server explains a refusal in `reason`, and the caller
+                # logs the exception class alone, so without this an exhausted
+                # download quota reads as a transient failure and the run
+                # advises retrying it forever. `reason` is the server's own
+                # account of why it declined; the other keys are named rather
+                # than printed, because a response may echo the study back.
+                details = download_info.get("details")
+                counters = ""
+                if isinstance(details, dict) and "limit" in details:
+                    # A count is not an identifier, and these two are the
+                    # whole diagnosis: they say how many archives the project
+                    # has drawn and how many it may.
+                    counters = (
+                        f" The project has retrieved {details.get('current')} "
+                        f"of its limit of {details.get('limit')}."
+                    )
+                logger.error(
+                    "The server declined to start the download. Its reason: "
+                    "%s. Its code: %s.%s",
+                    reason or "(the response had no reason field)",
+                    download_info.get("code", "(none given)"),
+                    counters,
+                )
             raise RuntimeError(
                 f"Download failed. Server response: {download_info}"
             )
