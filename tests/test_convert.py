@@ -469,6 +469,22 @@ class TestUltrasoundConversion:
         assert clip.attrs["grayscale"] is False
         assert clip.ndim == 4 and clip.shape[-1] == 3
 
+    def test_an_instance_with_no_region_loses_its_clip_and_not_the_exam(self, tmp_path):
+        """The clip cannot be de-identified, so it goes. Every sound clip in
+        the same archive stays, which is what raising used to prevent."""
+        archive = make_us_archive(
+            tmp_path / "A0001.zip", [{"region": None}, {}, {}]
+        )
+        written = convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+        group = zarr.open_group(tmp_path / "A0001.zarr", mode="r")
+        assert written == 2
+        assert len(list(group.array_keys())) == 2
+
+    def test_an_archive_of_nothing_but_regionless_clips_fails(self, tmp_path):
+        archive = make_us_archive(tmp_path / "A0001.zip", [{"region": None}])
+        with pytest.raises(ConversionError, match="no declared image region"):
+            convert_us_archive(archive, tmp_path / "A0001.zarr", min_frames=20)
+
     def test_skip_colour_drops_a_doppler_clip_and_keeps_the_rest(self, tmp_path):
         archive = make_us_archive(
             tmp_path / "A0001.zip", [{"colour": True}, {}]

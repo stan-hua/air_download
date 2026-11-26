@@ -756,6 +756,7 @@ def convert_us_archive(
     """
     written = 0
     colour = 0
+    no_region = 0
     group = None
 
     with zipfile.ZipFile(archive) as zf:
@@ -779,7 +780,18 @@ def convert_us_archive(
             if n_frames == 1:
                 frames = frames[None]
 
-            x0, y0, x1, y1 = region_box(ds)
+            try:
+                x0, y0, x1, y1 = region_box(ds)
+            except ConversionError as exc:
+                # One instance declaring no image region cannot be
+                # de-identified, and `tighten_to_beamform` does not substitute
+                # for the crop: its mask grows through connected bright pixels,
+                # and it returns the frame untouched when nothing moves. So
+                # skip the clip. Raising here would discard every sound clip
+                # in the same exam, which is what it used to do.
+                no_region += 1
+                logger.debug("Skipped one clip in %s: %s", archive.name, exc)
+                continue
             frames = frames[:, y0:y1, x0:x1]
 
             tight = None
@@ -830,13 +842,23 @@ def convert_us_archive(
             )
             written += 1
 
-    if colour:
-        logger.debug("Skipped %d colour clip(s) in %s.", colour, archive.name)
+    if colour or no_region:
+        logger.debug(
+            "Skipped %d colour clip(s) and %d with no declared region in %s.",
+            colour,
+            no_region,
+            archive.name,
+        )
     if not written:
+        skipped = []
+        if colour:
+            skipped.append(f"{colour} colour clip(s)")
+        if no_region:
+            skipped.append(f"{no_region} clip(s) with no declared image region")
         raise ConversionError(
             f"No ultrasound clip of at least {min_frames} frames in this "
             f"archive"
-            + (f", after skipping {colour} colour clip(s)." if colour else ".")
+            + (f", after skipping {' and '.join(skipped)}." if skipped else ".")
         )
     verify_us_output(destination, written)
     return written
