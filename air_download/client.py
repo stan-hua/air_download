@@ -37,6 +37,15 @@ DEFAULT_MAX_RETRIES = 5
 DEFAULT_BACKOFF_FACTOR = 1.0
 DEFAULT_MAX_BACKOFF = 60.0
 RETRY_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+# A JWT from this API lasts about half an hour, which is shorter than a cohort
+# download. These codes mean the token sent with a request is no longer good, so
+# the remedy is a fresh token rather than a backoff. 403 is in the set because
+# the API does not document which of the two it returns on expiry, and a replay
+# costs one request and happens at most once per call.
+UNAUTHORIZED_STATUS_CODES = frozenset({401, 403})
+# The one endpoint that must never trigger a re-authentication: `authenticate`
+# posts to it, so the two would call each other without end.
+LOGIN_ENDPOINT = "login"
 
 # Modality codes accepted by the `modality` query parameter of
 # /secure/search/query-data-source, per docs/misc/air_open_api.yaml.
@@ -304,6 +313,14 @@ class AIRClient:
         4xx — is returned or raised immediately, since retrying will not
         change the outcome.
 
+        The codes in ``UNAUTHORIZED_STATUS_CODES`` are the one exception, and
+        they are handled before that rule rather than by it. A JWT lasts about
+        half an hour while a cohort download takes days, so the token expires
+        mid-run and every later request is rejected. Such a response triggers
+        one re-authentication and one immediate replay, with no backoff,
+        because the token was the problem and waiting does not mend it. The
+        replay happens at most once per call and never for ``login`` itself.
+
         Args:
             endpoint: API endpoint path (appended to the base URL).
             raise_for_status: If True (default), raise an HTTPError for
@@ -320,11 +337,28 @@ class AIRClient:
             requests.RequestException: If every attempt failed to connect.
         """
         url = urljoin(self.url, endpoint)
+        reauthenticated = False
 
         for attempt in range(self._max_retries + 1):
             retry_after = None
             try:
                 response = self._session.post(url, **kwargs)
+                if (
+                    response.status_code in UNAUTHORIZED_STATUS_CODES
+                    and endpoint != LOGIN_ENDPOINT
+                    and not reauthenticated
+                ):
+                    # Set before the attempt, so a login that comes back
+                    # rejected again cannot start a second round.
+                    reauthenticated = True
+                    if self._refresh_auth(kwargs):
+                        logger.warning(
+                            "HTTP %d from %s; the token had expired, so "
+                            "getting a new one and sending the request again.",
+                            response.status_code,
+                            endpoint,
+                        )
+                        response = self._session.post(url, **kwargs)
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == self._max_retries:
                     raise
@@ -384,6 +418,44 @@ class AIRClient:
         if self._jwt is None:
             self.authenticate()
         return {"Authorization": f"Bearer {self._jwt}"}
+
+    def _refresh_auth(self, kwargs: dict[str, Any]) -> bool:
+        """Get a new token and write it into a request's own arguments.
+
+        A caller builds its headers before `_post` runs, so the stale token is
+        already inside `kwargs` by the time the API rejects it. Replacing it
+        there is what makes a replay meaningful.
+
+        The token appears in two places: an `Authorization` header on most
+        endpoints, and a `jwt` form field on the download stream. This
+        rewrites both.
+
+        Args:
+            kwargs: The keyword arguments `_post` is about to send again.
+                Modified in place.
+
+        Returns:
+            True when a token was found and replaced. False means the request
+            sent no token, so its rejection is about something else and a
+            replay would only repeat it.
+        """
+        found = False
+        headers = kwargs.get("headers")
+        if isinstance(headers, dict) and "Authorization" in headers:
+            found = True
+        data = kwargs.get("data")
+        if isinstance(data, dict) and "jwt" in data:
+            found = True
+        if not found:
+            return False
+
+        self._jwt = None
+        self.authenticate()
+        if isinstance(headers, dict) and "Authorization" in headers:
+            kwargs["headers"] = {**headers, **self._auth_header}
+        if isinstance(data, dict) and "jwt" in data:
+            kwargs["data"] = {**data, "jwt": self._jwt}
+        return True
 
     def list_projects(self) -> list[dict[str, Any]]:
         """List available projects from the API.

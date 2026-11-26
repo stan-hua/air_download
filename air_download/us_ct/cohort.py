@@ -528,10 +528,17 @@ def download_cohort(
                 counts[outcome] += 1
             except Exception as exc:  # noqa: BLE001 - one bad exam is not fatal
                 counts["failed"] += 1
+                # The status code is the whole diagnosis for an HTTP failure,
+                # and the class name alone hides it. A run that lost 33 of 200
+                # archives to an expired token reported only `HTTPError`, so
+                # which code it had been had to be guessed. A status code is
+                # not an identifier, so it is safe at ERROR.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.error(
-                    "An exam failed to download (%s); continuing with the "
+                    "An exam failed to download (%s%s); continuing with the "
                     "rest. Re-run to retry it.",
                     exc.__class__.__name__,
+                    f", HTTP {status}" if status else "",
                 )
                 # Only at DEBUG: the detail can carry an identifier.
                 logger.debug("Failure detail: %s", exc)
